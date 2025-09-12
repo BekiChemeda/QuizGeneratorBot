@@ -5,6 +5,7 @@ from telebot import TeleBot
 import time
 from pymongo.database import Database
 from ..services.gemini import generate_questions
+from ..repositories.users import UsersRepository
 
 
 class QuizScheduler:
@@ -32,8 +33,9 @@ class QuizScheduler:
                 qtype = (sched.get("question_type") or "text").lower()
                 delay = max(5, min(60, int(sched.get("delay_seconds", 5))))
                 target = sched.get("target_chat_id")
+                user_id = int(sched.get("user_id"))
 
-                questions = generate_questions(note, num)
+                questions = generate_questions(note, num, user_id=user_id)
                 if not questions:
                     self.schedules.update_one({"_id": sched["_id"]}, {"$set": {"status": "failed"}})
                     continue
@@ -61,6 +63,8 @@ class QuizScheduler:
                             explanation=(q.get("explanation") or "")[:195],
                         )
 
+                UsersRepository(self.db).bump_generations(user_id, 1)
+                UsersRepository(self.db).bump_questions_generated(user_id, len(questions))
                 self.schedules.update_one({"_id": sched["_id"]}, {"$set": {"status": "sent"}})
             except Exception:
                 self.schedules.update_one({"_id": sched["_id"]}, {"$set": {"status": "failed"}})

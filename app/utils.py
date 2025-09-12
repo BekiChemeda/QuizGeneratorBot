@@ -4,6 +4,7 @@ from typing import List
 from .config import get_config
 from .services.settings_service import SettingsService
 from .db import get_db
+from datetime import datetime, timedelta, timezone
 
 
 def is_admin(user_doc: dict) -> bool:
@@ -32,3 +33,18 @@ def home_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🔙home", callback_data="home"))
     return kb
+
+
+def tz_utc_plus3() -> timezone:
+    return timezone(timedelta(hours=get_config().tz_offset_hours))
+
+
+def now_local() -> datetime:
+    return datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(tz_utc_plus3())
+
+
+def format_dt_local(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(tz_utc_plus3())
+    return local.strftime("%Y-%m-%d %H:%M")

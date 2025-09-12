@@ -26,10 +26,12 @@ def init_db() -> Tuple[MongoClient, Database]:
 
     # Ensure indexes
     _db["users"].create_index("id", unique=True)
+    _db["users"].create_index("gemini_api_key_hash", unique=True, sparse=True)
     _db["settings"].create_index("key", unique=True)
     _db["channels"].create_index([("user_id", 1), ("chat_id", 1)], unique=True)
     _db["payments"].create_index([("user_id", 1), ("time", 1)])
     _db["schedules"].create_index([("user_id", 1), ("scheduled_at", 1)])
+    _db["uploads"].create_index([("user_id", 1), ("created_at", 1)])
 
     return _client, _db
 

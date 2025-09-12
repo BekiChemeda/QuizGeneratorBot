@@ -16,7 +16,7 @@ from .repositories.users import UsersRepository
 from .repositories.channels import ChannelsRepository
 from .repositories.payments import PaymentsRepository
 from .repositories.schedules import SchedulesRepository
-from .services.gemini import generate_questions
+from .services.gemini import generate_questions, validate_gemini_key
 from .services.quota import (
     has_quota,
     can_submit_note_now,
@@ -26,7 +26,7 @@ from .services.quota import (
     increase_total_notes,
 )
 from .services.scheduler import QuizScheduler
-from .utils import is_subscribed, home_keyboard
+from .utils import is_subscribed, home_keyboard, now_local, format_dt_local
 
 
 cfg = get_config()
@@ -63,7 +63,7 @@ def main_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton("⏰ Schedule", callback_data="schedule_menu"),
     )
     kb.row(
-        InlineKeyboardButton("ℹ️ About", callback_data="about"),
+        InlineKeyboardButton("🔑 API Key", callback_data="apikey_menu"),
         InlineKeyboardButton("🆘 FAQs", callback_data="faq"),
     )
     kb.row(
@@ -97,9 +97,73 @@ def handle_start(message: Message):
         "- Choose between text or quiz mode\n"
         "- Deliver to PM or your channel\n"
         "- Configure delay and schedule delivery\n\n"
-        "Your support makes this bot better!"
+        "Tip: Add your own Gemini API key to avoid global limits."
     )
     bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu())
+
+
+# API key management
+@bot.callback_query_handler(func=lambda call: call.data == "apikey_menu")
+def handle_apikey_menu(call: CallbackQuery):
+    user_id = call.from_user.id
+    user = users_repo.get(user_id) or {}
+    has_key = bool(user.get("has_personal_gemini_key"))
+    msg = (
+        "<b>Gemini API Key</b>\n\n"
+        "Set a personal API key to bypass shared limits.\n"
+        "Get one at <a href=\"https://aistudio.google.com/app/apikey\">Google AI Studio</a>.\n\n"
+        f"Status: {'✅ Set' if has_key else '❌ Not set'}\n"
+        "We never store your raw key, only a hash.\n"
+    )
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("Add / Update Key", callback_data="apikey_set"),
+        InlineKeyboardButton("Remove Key", callback_data="apikey_remove"),
+        InlineKeyboardButton("🔙 Home", callback_data="home"),
+    )
+    try:
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+    except Exception:
+        bot.send_message(user_id, msg, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "apikey_set")
+def apikey_set(call: CallbackQuery):
+    user_id = call.from_user.id
+    pending_notes.pop(user_id, None)
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id, "Send your Gemini API key as a single message. We'll validate it.")
+    pending_notes[user_id] = {"stage": "await_apikey"}
+
+
+@bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_apikey")
+def handle_apikey_input(message: Message):
+    user_id = message.from_user.id
+    key = (message.text or "").strip()
+    if not key:
+        bot.reply_to(message, "Key cannot be empty.")
+        return
+    checking = bot.reply_to(message, "Validating key...")
+    ok = validate_gemini_key(key)
+    try:
+        bot.delete_message(message.chat.id, checking.id)
+    except Exception:
+        pass
+    if not ok:
+        bot.reply_to(message, "❌ Invalid key. Get one at https://aistudio.google.com/app/apikey")
+        pending_notes.pop(user_id, None)
+        return
+    users_repo.set_gemini_api_key(user_id, key)
+    pending_notes.pop(user_id, None)
+    bot.reply_to(message, "✅ Key saved successfully.", reply_markup=home_keyboard())
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "apikey_remove")
+def apikey_remove(call: CallbackQuery):
+    user_id = call.from_user.id
+    users_repo.set_gemini_api_key(user_id, None)
+    bot.answer_callback_query(call.id, "Removed.")
+    handle_apikey_menu(call)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "profile")
@@ -238,7 +302,7 @@ def handle_generate(call: CallbackQuery):
     bot.answer_callback_query(call.id)
     bot.send_message(
         user_id,
-        "Send your note now as a single text message.\nThen you'll choose: destination (PM or channel), delay between questions (5s-60s), and optional scheduling.",
+        "Send your note now as a single text message (or just a title).\nThen you'll choose: destination (PM or channel), delay between questions (5s-60s), and optional scheduling.",
         reply_markup=home_keyboard(),
     )
 
@@ -256,10 +320,27 @@ def handle_note_submission(message: Message):
     for ch in user_channels:
         label = f"{ch.get('title','Channel')} ({ch.get('username') or ch.get('chat_id')})"
         kb.add(InlineKeyboardButton(f"📣 {label}", callback_data=f"dst_ch_{ch['chat_id']}"))
+    kb.add(InlineKeyboardButton("🎯 Title-only", callback_data="mode_titleonly"))
+    kb.add(InlineKeyboardButton("🚀 Allow beyond note", callback_data="mode_beyond"))
     kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
 
     pending_notes[user_id]["stage"] = "choose_destination"
     bot.send_message(user_id, "Choose where to send the quiz:", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("mode_titleonly", "mode_beyond"))
+def handle_modes(call: CallbackQuery):
+    user_id = call.from_user.id
+    state = pending_notes.get(user_id)
+    if not state:
+        bot.answer_callback_query(call.id)
+        return
+    if call.data == "mode_titleonly":
+        state["title_only"] = True
+        bot.answer_callback_query(call.id, "Title-only mode enabled. AI may include extra info.")
+    else:
+        state["allow_beyond"] = True
+        bot.answer_callback_query(call.id, "Beyond-note enabled. AI may add relevant info.")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dst_"))
@@ -379,7 +460,13 @@ def send_now(call: CallbackQuery):
 
     generating = bot.send_message(user_id, "Generating...")
     try:
-        questions = generate_questions(note, num_questions)
+        questions = generate_questions(
+            note,
+            num_questions,
+            user_id=user_id,
+            allow_beyond=bool(state.get("allow_beyond")),
+            title_only=bool(state.get("title_only")),
+        )
         if not questions:
             bot.send_message(user_id, "An error occurred while generating questions. Please try again.")
             return
@@ -408,7 +495,12 @@ def send_now(call: CallbackQuery):
                 )
         increment_quota(db, user_id)
         increase_total_notes(db, user_id)
-        bot.send_message(user_id, "✅ Questions generated successfully.", reply_markup=home_keyboard())
+        users_repo.bump_generations(user_id, 1)
+        users_repo.bump_questions_generated(user_id, len(questions))
+        targets = state.get("target_label", "PM")
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🏠 Home", callback_data="home"))
+        bot.send_message(user_id, f"✅ Generated {len(questions)} questions\nPosted to: {targets}", reply_markup=kb)
     except Exception as e:
         bot.send_message(user_id, f"Something went wrong: {e}")
     finally:
@@ -424,7 +516,7 @@ def do_schedule(call: CallbackQuery):
         return
     state["stage"] = "await_schedule_time"
     bot.answer_callback_query(call.id)
-    bot.send_message(user_id, "Send schedule time in format YYYY-MM-DD HH:MM (UTC). Example: 2025-01-01 12:30")
+    bot.send_message(user_id, "Send schedule time in format YYYY-MM-DD HH:MM (UTC+3). Example: 2025-01-01 12:30")
 
 
 @bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_schedule_time")
@@ -436,7 +528,7 @@ def handle_schedule_time(message: Message):
     try:
         dt = datetime.strptime(message.text.strip(), "%Y-%m-%d %H:%M")
     except Exception:
-        bot.reply_to(message, "Invalid format. Use YYYY-MM-DD HH:MM (UTC)")
+        bot.reply_to(message, "Invalid format. Use YYYY-MM-DD HH:MM (UTC+3)")
         return
 
     # Save schedule
@@ -444,6 +536,9 @@ def handle_schedule_time(message: Message):
     num_questions = int(user.get("questions_per_note", 5))
     q_format = (user.get("default_question_type") or cfg.question_type_default).lower()
 
+    # interpret provided time as UTC+3 then store as UTC
+    local_dt = dt
+    dt_utc = local_dt - timedelta(hours=3)
     schedules_repo.create(
         {
             "user_id": user_id,
@@ -453,13 +548,13 @@ def handle_schedule_time(message: Message):
             "num_questions": num_questions,
             "question_type": q_format,
             "delay_seconds": int(state.get("delay_seconds", 5)),
-            "scheduled_at": dt,
+            "scheduled_at": dt_utc,
             "status": "pending",
             "created_at": datetime.utcnow(),
         }
     )
     pending_notes.pop(user_id, None)
-    bot.send_message(user_id, "📅 Scheduled successfully.", reply_markup=home_keyboard())
+    bot.send_message(user_id, f"📅 Scheduled successfully for {message.text.strip()} (UTC+3).", reply_markup=home_keyboard())
 
 
 # Settings

@@ -1,6 +1,9 @@
 from typing import Optional, Dict, Any
 from datetime import datetime
 from pymongo.database import Database
+import hashlib
+from ..config import get_config
+from ..services.crypto import encrypt_text, decrypt_text
 
 
 class UsersRepository:
@@ -20,10 +23,15 @@ class UsersRepository:
                 "role": "user",
                 "registered_at": now,
                 "total_notes": 0,
+                "total_generations": 0,
+                "total_questions_generated": 0,
                 "notes_today": 0,
                 "last_note_time": None,
                 "default_question_type": "text",
                 "questions_per_note": 5,
+                "gemini_api_key_hash": None,
+                "has_personal_gemini_key": False,
+                "gemini_api_key_enc": None,
             },
             "$set": {"username": username} if username else {},
         }
@@ -76,3 +84,37 @@ class UsersRepository:
         now = datetime.utcnow()
         if last.date() != now.date():
             self.collection.update_one({"id": user_id}, {"$set": {"notes_today": 0}})
+
+    # Gemini key management
+    def set_gemini_api_key(self, user_id: int, api_key: str | None) -> None:
+        cfg = get_config()
+        if api_key:
+            key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+            enc = encrypt_text(api_key, cfg.gemini_key_secret)
+            self.collection.update_one(
+                {"id": user_id},
+                {"$set": {"gemini_api_key_hash": key_hash, "gemini_api_key_enc": enc, "has_personal_gemini_key": True}}
+            )
+        else:
+            self.collection.update_one(
+                {"id": user_id},
+                {"$set": {"gemini_api_key_hash": None, "gemini_api_key_enc": None, "has_personal_gemini_key": False}}
+            )
+
+    def has_personal_key(self, user_id: int) -> bool:
+        user = self.get(user_id) or {}
+        return bool(user.get("has_personal_gemini_key"))
+
+    def get_personal_key(self, user_id: int) -> Optional[str]:
+        user = self.get(user_id) or {}
+        enc = user.get("gemini_api_key_enc")
+        if not enc:
+            return None
+        return decrypt_text(enc, get_config().gemini_key_secret)
+
+    # Usage counters
+    def bump_generations(self, user_id: int, inc: int = 1) -> None:
+        self.collection.update_one({"id": user_id}, {"$inc": {"total_generations": inc}})
+
+    def bump_questions_generated(self, user_id: int, count: int) -> None:
+        self.collection.update_one({"id": user_id}, {"$inc": {"total_questions_generated": int(count)}})
