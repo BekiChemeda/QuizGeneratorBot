@@ -5,6 +5,7 @@ from telebot import TeleBot
 import time
 from pymongo.database import Database
 from ..services.gemini import generate_questions
+from ..services.file_parser import chunk_text
 
 
 class QuizScheduler:
@@ -24,16 +25,38 @@ class QuizScheduler:
 
     def _tick(self) -> None:
         now = datetime.utcnow()
-        due = list(self.schedules.find({"status": "pending", "scheduled_at": {"$lte": now}}).sort("scheduled_at", 1))
+        # Claim in small batches to avoid race conditions
+        due = list(self.schedules.find({"status": "pending", "scheduled_at": {"$lte": now}}).sort("scheduled_at", 1).limit(10))
         for sched in due:
+            # Try to atomically claim this schedule
+            res = self.schedules.update_one({"_id": sched["_id"], "status": "pending"}, {"$set": {"status": "processing"}})
+            if res.modified_count == 0:
+                continue
             try:
                 note = sched.get("note", "")
+                title = sched.get("title")
+                file_content = sched.get("file_content")
                 num = int(sched.get("num_questions", 5))
                 qtype = (sched.get("question_type") or "text").lower()
                 delay = max(5, min(60, int(sched.get("delay_seconds", 5))))
                 target = sched.get("target_chat_id")
 
-                questions = generate_questions(note, num)
+                allow_beyond = bool(sched.get("allow_beyond", False))
+                user_id = int(sched.get("user_id"))
+                if file_content:
+                    chunks = chunk_text(file_content, max_chars=3500)
+                    per_chunk = max(1, num // max(1, len(chunks)))
+                    questions = []
+                    for idx, ch in enumerate(chunks):
+                        if len(questions) >= num:
+                            break
+                        qbatch = generate_questions(ch, per_chunk, user_id=user_id, title_only=False, allow_beyond=True)
+                        questions.extend(qbatch)
+                    questions = questions[:num]
+                elif title:
+                    questions = generate_questions("", num, user_id=user_id, title_only=True, allow_beyond=True, topic_title=title)
+                else:
+                    questions = generate_questions(note, num, user_id=user_id, title_only=False, allow_beyond=allow_beyond)
                 if not questions:
                     self.schedules.update_one({"_id": sched["_id"]}, {"$set": {"status": "failed"}})
                     continue
@@ -62,5 +85,10 @@ class QuizScheduler:
                         )
 
                 self.schedules.update_one({"_id": sched["_id"]}, {"$set": {"status": "sent"}})
+                # Send summary to user
+                try:
+                    self.bot.send_message(user_id, f"✅ Scheduled quiz posted: {len(questions)} questions to {sched.get('target_label','PM')}")
+                except Exception:
+                    pass
             except Exception:
                 self.schedules.update_one({"_id": sched["_id"]}, {"$set": {"status": "failed"}})

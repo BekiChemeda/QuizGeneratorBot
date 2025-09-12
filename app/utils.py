@@ -1,6 +1,7 @@
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import List
+from datetime import datetime, timedelta, timezone
 from .config import get_config
 from .services.settings_service import SettingsService
 from .db import get_db
@@ -32,3 +33,28 @@ def home_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🔙home", callback_data="home"))
     return kb
+
+
+# Time utilities: enforce UTC+3 for display and scheduling inputs
+UTC = timezone.utc
+UTC_PLUS_3 = timezone(timedelta(hours=3))
+
+
+def now_utc() -> datetime:
+    return datetime.now(tz=UTC)
+
+
+def to_utc3(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC_PLUS_3)
+
+
+def from_utc3_to_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC_PLUS_3)
+    return dt.astimezone(UTC)
+
+
+def format_dt_utc3(dt: datetime, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    return to_utc3(dt).strftime(fmt)
