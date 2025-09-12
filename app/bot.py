@@ -40,14 +40,14 @@ try:
 except Exception:
     db = None
 
-settings_repo = SettingsRepository(db) if db else None
-users_repo = UsersRepository(db) if db else None
-channels_repo = ChannelsRepository(db) if db else None
-payments_repo = PaymentsRepository(db) if db else None
-schedules_repo = SchedulesRepository(db) if db else None
+settings_repo = SettingsRepository(db) if db is not None else None
+users_repo = UsersRepository(db) if db is not None else None
+channels_repo = ChannelsRepository(db) if db is not None else None
+payments_repo = PaymentsRepository(db) if db is not None else None
+schedules_repo = SchedulesRepository(db) if db is not None else None
 
 bot = TeleBot(cfg.bot_token)
-if db:
+if db is not None:
     scheduler = QuizScheduler(db, bot)
     scheduler.start()
 
