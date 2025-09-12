@@ -12,7 +12,12 @@ def has_quota(db: Database, user_id: int) -> bool:
     cfg = get_config()
     users_repo = UsersRepository(db)
     user = users_repo.get(user_id) or {}
-    max_notes = cfg.max_notes_premium if is_premium(user) else cfg.max_notes_regular
+    # If user has no personal Gemini key, reduce daily quota to 2
+    personal_key = user.get("gemini_api_key")
+    if not personal_key or not str(personal_key).strip():
+        max_notes = 2
+    else:
+        max_notes = cfg.max_notes_premium if is_premium(user) else cfg.max_notes_regular
     return int(user.get("notes_today", 0)) < int(max_notes)
 
 

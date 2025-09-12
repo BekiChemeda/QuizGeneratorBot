@@ -76,3 +76,13 @@ class UsersRepository:
         now = datetime.utcnow()
         if last.date() != now.date():
             self.collection.update_one({"id": user_id}, {"$set": {"notes_today": 0}})
+
+    # Gemini API key management
+    def set_gemini_api_key(self, user_id: int, api_key: str | None) -> None:
+        update = {"$unset": {"gemini_api_key": ""}} if not api_key else {"$set": {"gemini_api_key": api_key}}
+        self.collection.update_one({"id": user_id}, update, upsert=True)
+
+    def get_gemini_api_key(self, user_id: int) -> str | None:
+        doc = self.get(user_id) or {}
+        key = doc.get("gemini_api_key")
+        return key if isinstance(key, str) and key.strip() else None
