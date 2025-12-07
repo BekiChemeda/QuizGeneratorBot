@@ -96,8 +96,12 @@ def error_handler(func):
     return wrapper
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
+    # Admin / Owner check
+    user = users_repo.get(user_id) if users_repo else None
+    if user and (user.get("role") == "admin" or user_id == cfg.owner_id):
+        kb.add(InlineKeyboardButton("🛠 Admin Manage", callback_data="admin_menu"))
     kb.add(
         InlineKeyboardButton("📝 Generate", callback_data="generate"),
         InlineKeyboardButton("👤 Profile", callback_data="profile"),
@@ -649,20 +653,65 @@ def handle_note_submission(message: Message):
 def handle_youtube_submission(message: Message):
     user_id = message.from_user.id
     url = message.text or ""
-    processing = bot.reply_to(message, "Fetching transcript...")
+    processing = bot.reply_to(message, "Fetching content (Transcript or Audio)...")
     try:
-        text = get_youtube_transcript(url)
-        if not text:
-             bot.edit_message_text("Could not fetch transcript. Is the video valid/captioned?", message.chat.id, processing.message_id)
-             return
+        text, audio_data, mime_type = get_youtube_transcript(url)
         bot.delete_message(message.chat.id, processing.message_id)
         
-        pending_notes[user_id]["note"] = text
-        pending_notes[user_id]["title"] = "YouTube Video"
-        bot.reply_to(message, "Transcript fetched successfully!")
+        if text:
+            pending_notes[user_id]["note"] = text
+            pending_notes[user_id]["title"] = "YouTube Video"
+            bot.reply_to(message, "✅ Transcript fetched successfully!")
+        elif audio_data:
+            pending_notes[user_id]["media_data"] = audio_data
+            pending_notes[user_id]["mime_type"] = mime_type
+            pending_notes[user_id]["title"] = "YouTube Audio"
+            bot.reply_to(message, "✅ Audio downloaded successfully (Transcript unavailable).")
+        else:
+             bot.send_message(user_id, "Could not fetch content. Video might be restricted or too long.")
+             return
+
         ask_difficulty(user_id)
     except Exception as e:
-        bot.edit_message_text(f"Error fetching transcript: {str(e)}", message.chat.id, processing.message_id)
+        logger.error(f"YouTube Error: {e}")
+        try:
+             bot.delete_message(message.chat.id, processing.message_id)
+        except:
+             pass
+        bot.send_message(user_id, "Failed to process YouTube video. Please try a shorter video or check the URL.")
+
+
+@bot.message_handler(content_types=["audio", "voice"], func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_audio")
+@error_handler
+def handle_audio_submission(message: Message):
+    user_id = message.from_user.id
+    
+    file_info = message.voice or message.audio
+    if file_info.file_size > 20 * 1024 * 1024:
+        bot.reply_to(message, "⚠️ File is too big. Please send audio files under 20MB.")
+        return
+
+    file_id = file_info.file_id
+    mime_type = file_info.mime_type
+    
+    processing = bot.reply_to(message, "Downloading audio...")
+    try:
+        file_path = bot.get_file(file_id).file_path
+        downloaded_file = bot.download_file(file_path)
+        
+        if not downloaded_file:
+             raise ValueError("Download failed")
+             
+        pending_notes[user_id]["media_data"] = downloaded_file
+        pending_notes[user_id]["mime_type"] = mime_type or "audio/ogg" 
+        pending_notes[user_id]["title"] = "Audio Note"
+        
+        bot.delete_message(message.chat.id, processing.message_id)
+        bot.reply_to(message, "Audio received!")
+        ask_difficulty(user_id)
+    except Exception as e:
+         logger.error(f"Audio processing error: {e}")
+         bot.edit_message_text("Error processing audio. Please try again.", message.chat.id, processing.message_id)
 
 
 @bot.message_handler(content_types=["audio", "voice"], func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_audio")
@@ -1470,7 +1519,8 @@ def admin_dashboard(message: Message):
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
-        InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
+        InlineKeyboardButton("� Force Subscription", callback_data="admin_manage_sub"),
+        InlineKeyboardButton("�💰 Set Premium Price", callback_data="admin_set_price"),
         InlineKeyboardButton("👥 Manage Users", callback_data="admin_users"),
         InlineKeyboardButton("🔙 Close", callback_data="close_admin"),
     )

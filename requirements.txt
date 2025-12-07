@@ -1,9 +1,6 @@
 pyTelegramBotAPI==4.22.0
 pymongo==4.8.0
 python-dotenv==1.0.1
-pyTelegramBotAPI==4.22.0
-pymongo==4.8.0
-python-dotenv==1.0.1
 pydantic==2.8.2
 APScheduler==3.10.4
 requests==2.32.3
@@ -14,4 +11,4 @@ python-pptx
 youtube-transcript-api
 reportlab
 google-genai
-python-docx==0.6.2
+yt-dlp
