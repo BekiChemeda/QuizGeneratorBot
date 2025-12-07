@@ -165,7 +165,31 @@ def handle_start(message: Message):
         "✨ Features:\n"
         "- Convert study notes into quizzes\n"
         "- Choose between text or quiz mode\n"
+        "- Deliver to PM or your channel\n"
+        "- Configure delay and schedule delivery\n\n"
+        f"Your referral link: https://t.me/{bot.get_me().username}?start=ref{user_id}\n"
+        "Invite 2 users to get Premium!\n\n"
+        "Your support makes this bot better!"
     )
+    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu(user_id), disable_web_page_preview=True)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "home")
+def handle_home(call: CallbackQuery):
+    user_id = call.from_user.id
+    pending_notes.pop(user_id, None)
+    try:
+        bot.edit_message_text(
+            "🏠 **Home**\nSelect an option below:", 
+            call.message.chat.id, 
+            call.message.message_id, 
+            parse_mode="Markdown", 
+            reply_markup=main_menu(user_id)
+        )
+    except Exception:
+        bot.send_message(user_id, "🏠 **Home**", parse_mode="Markdown", reply_markup=main_menu(user_id))
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "faq")
 def handle_faq(call: CallbackQuery):
     try:
