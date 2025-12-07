@@ -165,13 +165,56 @@ def handle_start(message: Message):
         "✨ Features:\n"
         "- Convert study notes into quizzes\n"
         "- Choose between text or quiz mode\n"
-        "- Deliver to PM or your channel\n"
-        "- Configure delay and schedule delivery\n\n"
-        f"Your referral link: https://t.me/{bot.get_me().username}?start=ref{user_id}\n"
-        "Invite 2 users to get Premium!\n\n"
-        "Your support makes this bot better!"
+
+@bot.callback_query_handler(func=lambda call: call.data == "faq")
+def handle_faq(call: CallbackQuery):
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    text = (
+        "📚 Frequently Asked Questions (FAQs)\n\n"
+        "1) Why limits? Resource management.\n"
+        "2) 24/7? Use a VPS for always-on.\n"
+        "3) Why slow? Free hosting limits.\n"
+        "4) Updates? Yes, more features coming.\n"
+        "5) Note size? Up to Telegram limits (~4096 chars).\n"
+        "6) AI? Gemini by Google.\n"
+        "7) Poll mode? Settings → Question Type → Poll.\n"
     )
-    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu())
+    bot.send_message(call.message.chat.id, text, reply_markup=home_keyboard()) # Using home_keyboard (Back to Home) is safer here as it likely uses utils.py logic? No, let's stick to utils home_keyboard for sub-menus, or main_menu(user_id)? 
+    # Actually, FAQ usually has a 'Back' button, which is home_keyboard().
+    # The error is explicitly main_menu() calls.
+    # Let me check where main_menu() is called.
+
+@bot.callback_query_handler(func=lambda call: call.data == "about")
+def handle_about(call: CallbackQuery):
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    text = (
+        "ℹ️ <b>About the Bot</b>\n\n"
+        "🤖 Version: <b><i>v2.0.0</i></b>\n"
+        "📚 Converts your text notes into MCQ quizzes.\n"
+        "🎓 For students, educators, creators.\n\n"
+        "🛠 New: MongoDB, user channels, delay, scheduling.\n"
+    )
+    bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=home_keyboard())
+
+# Correction: The search results showed main_menu() in handle_start (already fixed in snippet 546 but maybe not applied if I edited blindly? No, snippet 546 looked good).
+# But search results showed `reply_markup=main_menu()` in handle_start at line 178 (in search output context, though line numbers drift).
+# Also line 520 (cancel_payment) uses home_keyboard().
+# Line 587 (confirm_payment) uses home_keyboard().
+# So the main culprit is handle_start if it wasn't updated, or handle_home if it calls main_menu().
+# Wait, handle_home calls handle_start usually? 
+# "def handle_home(call): ... handle_start(call.message)" -> This is safe if handle_start extracts user_id correctly.
+# But if handle_home calls main_menu() directly...
+
+# Looking at line 1400 (search result for `text, parse_mode="HTML", reply_markup=main_menu())`):
+# That looks like handle_start.
+
+# Let's fix handle_start and any other direct calls.
 
 
 @bot.message_handler(commands=["addadmin"])
@@ -190,20 +233,101 @@ def handle_add_admin(message: Message):
         bot.reply_to(message, f"Error: {e}")
 
 
-@bot.message_handler(commands=["removeadmin"])
-def handle_remove_admin(message: Message):
-    if message.from_user.id != cfg.owner_id:
+@bot.callback_query_handler(func=lambda call: call.data == "admin_menu")
+def handle_admin_menu_btn(call: CallbackQuery):
+    admin_dashboard(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_manage_sub")
+def handle_admin_manage_sub(call: CallbackQuery):
+    user_id = call.from_user.id
+    # Auth Check
+    admin = users_repo.get(user_id)
+    is_owner = (user_id == cfg.owner_id)
+    if not is_owner and (not admin or admin.get("role") != "admin"):
+        bot.answer_callback_query(call.id, "Not authorized.")
         return
+
+    # Get settings
+    sr = SettingsRepository(db)
+    force = sr.get("force_subscription", cfg.force_subscription)
+    channels = sr.get("force_channels", cfg.force_channels)
+    
+    status_icon = "mV" if force else "❌"
+    toggle_btn_text = "Disable Force Sub" if force else "Enable Force Sub"
+    
+    text = (
+        f"🔐 **Force Subscription Management**\n\n"
+        f"Status: {status_icon} **{'Enabled' if force else 'Disabled'}**\n"
+        f"Channels Required: {len(channels)}"
+    )
+    
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton(toggle_btn_text, callback_data="admin_toggle_force"))
+    
+    for ch in channels:
+        kb.add(InlineKeyboardButton(f"❌ Remove {ch}", callback_data=f"admin_rm_sub_{ch}"))
+        
+    kb.add(InlineKeyboardButton("➕ Add Channel", callback_data="admin_add_sub_prompt"))
+    kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
+    
     try:
-        args = message.text.split()
-        if len(args) < 2:
-            bot.reply_to(message, "Usage: /removeadmin <user_id>")
-            return
-        target_id = int(args[1])
-        users_repo.revoke_admin(target_id)
-        bot.reply_to(message, f"User {target_id} is no longer an admin.")
-    except Exception as e:
-        bot.reply_to(message, f"Error: {e}")
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_toggle_force")
+def toggle_force_sub(call: CallbackQuery):
+    user_id = call.from_user.id
+    # Auth Check
+    admin = users_repo.get(user_id)
+    is_owner = (user_id == cfg.owner_id)
+    if not is_owner and (not admin or admin.get("role") != "admin"):
+        bot.answer_callback_query(call.id)
+        return
+
+    sr = SettingsRepository(db)
+    current = sr.get("force_subscription", cfg.force_subscription)
+    sr.set("force_subscription", not current)
+    handle_admin_manage_sub(call)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_rm_sub_"))
+def remove_force_channel(call: CallbackQuery):
+    channel = call.data.replace("admin_rm_sub_", "")
+    sr = SettingsRepository(db)
+    channels = sr.get("force_channels", cfg.force_channels)
+    if channel in channels:
+        channels.remove(channel)
+        sr.set("force_channels", channels)
+    handle_admin_manage_sub(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_add_sub_prompt")
+def prompt_add_force_channel(call: CallbackQuery):
+    user_id = call.from_user.id
+    pending_notes[user_id] = {"stage": "await_admin_force_channel"}
+    bot.send_message(user_id, "Send the channel @username (bot must be admin there).")
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_admin_force_channel")
+def handle_add_force_channel_msg(message: Message):
+    user_id = message.from_user.id
+    channel = message.text.strip()
+    if not channel.startswith("@"):
+        bot.reply_to(message, "Invalid format. Use @channelname.")
+        return
+        
+    sr = SettingsRepository(db)
+    channels = sr.get("force_channels", cfg.force_channels)
+    if channel not in channels:
+        channels.append(channel)
+        sr.set("force_channels", channels)
+    
+    pending_notes.pop(user_id, None)
+    bot.reply_to(message, f"Added {channel} to required channels.")
+    
+    # Show menu again
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🔙 Manage Subs", callback_data="admin_manage_sub"))
+    bot.send_message(user_id, "Channel added.", reply_markup=kb)
 
 
 @bot.message_handler(commands=["addpremium"])
