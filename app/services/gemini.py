@@ -1,56 +1,3 @@
-from typing import List, Dict, Optional
-import requests
-import json
-from ..config import get_config
-from ..repositories.users import UsersRepository
-from ..db import get_db
-
-
-def _choose_api_key(user_id: Optional[int]) -> Optional[str]:
-    """Return user's own Gemini key if set; otherwise fallback to global, if any."""
-    cfg = get_config()
-    api_key = None
-    try:
-        if user_id is not None:
-            db = get_db()
-            api_key = UsersRepository(db).get_gemini_api_key(user_id)
-    except Exception:
-        api_key = None
-    if not api_key:
-        api_key = cfg.gemini_api_key or None
-    return api_key
-
-import base64
-
-def generate_questions(
-    note: str,
-    num_questions: int = 5,
-    *,
-    user_id: Optional[int] = None,
-    title_only: bool = False,
-    allow_beyond: bool = False,
-    topic_title: Optional[str] = None,
-    difficulty: str = "Medium",
-    media_data: Optional[bytes] = None,
-    mime_type: Optional[str] = None,
-    question_type: str = "multiple_choice"
-) -> List[Dict]:
-    api_key = _choose_api_key(user_id)
-    if not api_key:
-        return []
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-
-    safe_note = (note or "").replace('"', '\\"')
-    safe_title = (topic_title or "").replace('"', '\\"')
-    scope_hint = "You may use knowledge beyond the note if needed." if allow_beyond else "Use only the provided content; avoid unrelated facts."
-    
-    source_block = ""
-    if title_only and safe_title:
-        source_block = f"Title: {safe_title}\nNote:\n```{safe_note}```"
-    elif safe_note:
-        source_block = f"Note:\n```{safe_note}```"
 
     prompt = f"""
 Generate {num_questions} {question_type} questions from the provided study material.
@@ -110,7 +57,7 @@ def validate_gemini_api_key(api_key: str) -> bool:
     api_key = (api_key or "").strip()
     if not api_key:
         return False
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+
     headers = {"Content-Type": "application/json"}
     data = {"contents": [{"parts": [{"text": "Return JSON array: []"}]}]}
     try:

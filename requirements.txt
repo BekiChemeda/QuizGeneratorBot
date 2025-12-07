@@ -13,4 +13,5 @@ python-docx==1.1.2
 python-pptx
 youtube-transcript-api
 reportlab
+google-genai
 python-docx==0.6.2
