@@ -84,7 +84,7 @@ Source:
              contents.append(prompt_text)
 
         # Using standard 1.5 flash for now as it is most stable public endpoint
-        model_id = "gemini-1.5-flash"
+        model_id = "gemini-2.5-flash"
         
         response = client.models.generate_content(
             model=model_id,
@@ -129,7 +129,7 @@ def validate_gemini_api_key(api_key: str) -> bool:
     try:
         client = genai.Client(api_key=api_key)
         client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents="Return empty JSON array: []",
         )
         return True
