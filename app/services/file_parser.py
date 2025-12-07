@@ -67,7 +67,7 @@ def save_file_record(db: Database, user_id: int, file_id: str, file_name: str, f
         "file_name": file_name,
         "file_size": file_size,
         "mime_type": mime_type,
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(),
     }
     res = db["files"].insert_one(doc)
     return str(res.inserted_id)

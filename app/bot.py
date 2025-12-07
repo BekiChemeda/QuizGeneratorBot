@@ -97,24 +97,18 @@ def error_handler(func):
 
 
 def main_menu() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup()
-    kb.row(
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
         InlineKeyboardButton("📝 Generate", callback_data="generate"),
         InlineKeyboardButton("👤 Profile", callback_data="profile"),
-    )
-    kb.row(
         InlineKeyboardButton("📢 My Channels", callback_data="channels"),
         InlineKeyboardButton("📂 My Quizzes", callback_data="my_quizzes"),
         InlineKeyboardButton("⏰ Schedule", callback_data="schedule_menu"),
-    )
-    kb.row(
         InlineKeyboardButton("ℹ️ About", callback_data="about"),
         InlineKeyboardButton("🆘 FAQs", callback_data="faq"),
-    )
-    kb.row(
         InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-        InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/Bek_i"),
     )
+    kb.add(InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/Bek_i"))
     return kb
 
 
@@ -123,8 +117,34 @@ def main_menu() -> InlineKeyboardMarkup:
 def handle_start(message: Message):
     user_id = message.chat.id
     username = message.from_user.username or "No"
+    
+    # Check for referral args
+    parts = message.text.split()
+    referrer_id = None
+    if len(parts) > 1 and parts[1].startswith("ref"):
+        try:
+            referrer_id = int(parts[1][3:])
+        except ValueError:
+            pass
 
     users_repo.upsert_user(user_id, username)
+
+    # Process Referral
+    if referrer_id:
+        if users_repo.set_referrer(user_id, referrer_id):
+            # Notify referrer
+            try:
+                bot.send_message(referrer_id, f"🎉 New user {username} joined via your link!")
+                # Check for reward
+                count = users_repo.get_referral_count(referrer_id)
+                target = 2 # hardcoded for now, move to settings
+                if count >= target:
+                    # Grant premium for 30 days? Or permanent? User said "users can be premium... by inviting 2 users"
+                    # Let's give 30 days for every 2 invites tailored logic can be refined
+                    users_repo.set_premium(referrer_id, duration_days=30)
+                    bot.send_message(referrer_id, f"🌟 You have invited {count} users! You've been granted 30 days of Premium!", parse_mode="HTML")
+            except Exception:
+                pass # Referral notification failed (blocked bot etc)
 
     if cfg.maintenance_mode:
         bot.send_message(user_id, "The bot is currently under maintenance. Please try again later.")
@@ -143,6 +163,8 @@ def handle_start(message: Message):
         "- Choose between text or quiz mode\n"
         "- Deliver to PM or your channel\n"
         "- Configure delay and schedule delivery\n\n"
+        "Your referral link: https://t.me/{bot.get_me().username}?start=ref{user_id}\n"
+        "Invite 2 users to get Premium!\n\n"
         "Your support makes this bot better!"
     )
     bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu())
@@ -429,12 +451,14 @@ def handle_export_quiz(call: CallbackQuery):
         file_io = None
         filename = f"{title[:20]}_{fmt}.{fmt}".replace(" ", "_")
         
+        bot_username = bot.get_me().username or "SmartQuizBot"
+
         if fmt == "pdf":
-            file_io = QuizExporter.to_pdf(title, questions)
+            file_io = QuizExporter.to_pdf(title, questions, bot_username)
         elif fmt == "docx":
-            file_io = QuizExporter.to_docx(title, questions)
+            file_io = QuizExporter.to_docx(title, questions, bot_username)
         elif fmt == "txt":
-            file_io = QuizExporter.to_txt(title, questions)
+            file_io = QuizExporter.to_txt(title, questions, bot_username)
             
         if file_io:
             bot.send_document(user_id, (filename, file_io))
@@ -549,14 +573,18 @@ def handle_file_submission(message: Message):
     user_id = message.from_user.id
     try:
         text, filename = fetch_and_parse_file(bot, db, message)
+        if not text or not text.strip():
+            bot.reply_to(message, "Could not extract text. Scanned PDFs/Images are not supported. Please send a text/DOCX/PPTX file.")
+            return
+
         pending_notes[user_id]["file_content"] = text
         pending_notes[user_id]["file_name"] = filename
         bot.reply_to(message, f"File parsed: {filename}")
         ask_difficulty(user_id)
     except ValueError as e:
-        bot.reply_to(message, f"Error: {e}")
+        bot.reply_to(message, f"File Error: {e}")
     except Exception as e:
-        bot.reply_to(message, "Failed to process file.")
+        bot.reply_to(message, "Failed to process file. Ensure it is a valid text-based PDF, DOCX, or PPTX.")
 
 
 @bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_note")
@@ -859,7 +887,7 @@ def send_now(call: CallbackQuery):
                 "user_id": user_id,
                 "title": quiz_title,
                 "questions": questions,
-                "created_at": datetime.utcnow()
+                "created_at": datetime.now()
             })
 
         # Send summary
@@ -894,7 +922,7 @@ def do_schedule(call: CallbackQuery):
     state["stage"] = "await_schedule_time"
     bot.answer_callback_query(call.id)
     # Show local UTC+3 time hint
-    now = datetime.utcnow()
+    now = datetime.now()
     bot.send_message(user_id, f"Send schedule time in format YYYY-MM-DD HH:MM (UTC+3). Example: 2025-01-01 12:30\nNow (UTC+3): {format_dt_utc3(now)}")
 
 
@@ -933,7 +961,7 @@ def handle_schedule_time(message: Message):
             "difficulty": state.get("difficulty", "Medium"),
             "scheduled_at": scheduled_utc,
             "status": "pending",
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(),
         }
     )
     pending_notes.pop(user_id, None)
@@ -1225,7 +1253,7 @@ def accept_payment(call: CallbackQuery):
     payments_repo.update_status(user_id, "accepted")
     amount = (settings_repo.get("premium_price", cfg.premium_price) if settings_repo else cfg.premium_price)
     bot.send_message(user_id, f"Your premium subscription for {amount} Birr has been approved!")
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     pay_channel = (settings_repo.get("payment_channel", cfg.payment_channel) if settings_repo else cfg.payment_channel)
     if pay_channel:
         try:
@@ -1375,8 +1403,8 @@ def admin_add_telebirr(message: Message):
     bot.reply_to(message, f"telebirr_numbers: {', '.join(current)}")
 
 
-@bot.message_handler(commands=["addcbe"]) 
-def admin_add_cbe(message: Message):
+@bot.message_handler(commands=["admin"]) 
+def admin_dashboard(message: Message):
     if not users_repo:
         bot.reply_to(message, "DB unavailable.")
         return
@@ -1384,15 +1412,94 @@ def admin_add_cbe(message: Message):
     if not admin or admin.get("role") != "admin":
         bot.reply_to(message, "Not authorized.")
         return
-    parts = message.text.strip().split()
-    if len(parts) < 2:
-        bot.reply_to(message, "Usage: /addcbe 1000123456")
+    
+    # Admin Dashboard Menu
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
+        InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
+        InlineKeyboardButton("👥 Manage Users", callback_data="admin_users"),
+        InlineKeyboardButton("🔙 Close", callback_data="close_admin"),
+    )
+    bot.reply_to(message, "🔧 **Admin Dashboard**", parse_mode="Markdown", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
+def handle_admin_callbacks(call: CallbackQuery):
+    user_id = call.from_user.id
+    admin = users_repo.get(user_id)
+    if not admin or admin.get("role") != "admin":
+        bot.answer_callback_query(call.id, "Not authorized.")
         return
-    current = SettingsRepository(db).get("cbe_numbers", [])
-    if parts[1] not in current:
-        current.append(parts[1])
-    SettingsRepository(db).set("cbe_numbers", current)
-    bot.reply_to(message, f"cbe_numbers: {', '.join(current)}")
+
+    if call.data == "admin_broadcast":
+        msg = bot.send_message(user_id, "Send the message you want to broadcast (Text, Photo, or Forward).")
+        bot.register_next_step_handler(msg, process_broadcast)
+    elif call.data == "admin_set_price":
+        # Placeholder
+        bot.answer_callback_query(call.id, "Feature coming soon.")
+    elif call.data == "admin_users":
+        bot.answer_callback_query(call.id, "Use /addadmin or /addpremium commands.")
+
+
+def process_broadcast(message: Message):
+    user_id = message.from_user.id
+    # Confirm broadcast
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Yes, Send", callback_data="confirm_broadcast"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")
+    )
+    
+    # Store message to broadcast in state (simplified)
+    pending_notes[user_id] = {"broadcast_msg": message} 
+    bot.reply_to(message, "Are you sure you want to broadcast this message to ALL users?", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ["confirm_broadcast", "cancel_broadcast"])
+def execute_broadcast(call: CallbackQuery):
+    user_id = call.from_user.id
+    if call.data == "cancel_broadcast":
+        pending_notes.pop(user_id, None)
+        bot.edit_message_text("Broadcast cancelled.", user_id, call.message.message_id)
+        return
+        
+    state = pending_notes.get(user_id, {})
+    broadcast_msg = state.get("broadcast_msg")
+    if not broadcast_msg:
+        bot.answer_callback_query(call.id, "Session expired.")
+        return
+
+    bot.edit_message_text("Broadcasting... This may take a while.", user_id, call.message.message_id)
+    
+    # Iterate all users (Naïve approach - heavy for large userbase, but fine for MVP)
+    # Ideally should use chunks or background task
+    all_users = users_repo.collection.find({})
+    count = 0
+    for u in all_users:
+        uid = u.get("id")
+        try:
+            if broadcast_msg.content_type == "text":
+                bot.send_message(uid, broadcast_msg.text)
+            elif broadcast_msg.content_type == "photo":
+                bot.send_photo(uid, broadcast_msg.photo[-1].file_id, caption=broadcast_msg.caption)
+            elif broadcast_msg.content_type == "document":
+                bot.send_document(uid, broadcast_msg.document.file_id, caption=broadcast_msg.caption)
+            elif broadcast_msg.content_type == "video":
+                bot.send_video(uid, broadcast_msg.video.file_id, caption=broadcast_msg.caption)
+            elif broadcast_msg.content_type == "audio":
+                bot.send_audio(uid, broadcast_msg.audio.file_id, caption=broadcast_msg.caption)
+            elif broadcast_msg.content_type == "voice":
+                bot.send_voice(uid, broadcast_msg.voice.file_id, caption=broadcast_msg.caption)
+            # Handle forwards if message was forwarded
+            # Simple copy_message equivalent
+            # bot.copy_message(uid, broadcast_msg.chat.id, broadcast_msg.message_id) 
+            count += 1
+        except Exception:
+            continue # User blocked bot etc.
+            
+    bot.send_message(user_id, f"✅ Broadcast complete. Sent to {count} users.")
+    pending_notes.pop(user_id, None)
 
 
 @bot.message_handler(commands=["setmaxnotes"]) 

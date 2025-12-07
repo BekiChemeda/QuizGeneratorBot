@@ -14,7 +14,7 @@ class PaymentsRepository:
             "amount": amount,
             "photo_file_id": photo_file_id,
             "status": "pending",
-            "time": datetime.utcnow(),
+            "time": datetime.now(),
         }
         self.collection.insert_one(doc)
 

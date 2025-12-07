@@ -13,7 +13,7 @@ class QuizzesRepository:
         quiz_data should contain: user_id, title, questions (list), created_at
         """
         if "created_at" not in quiz_data:
-            quiz_data["created_at"] = datetime.utcnow()
+            quiz_data["created_at"] = datetime.now()
         result = self.collection.insert_one(quiz_data)
         return str(result.inserted_id)
 

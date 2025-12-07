@@ -83,8 +83,12 @@ Source:
         else:
              contents.append(prompt_text)
 
-        # Using standard 1.5 flash for now as it is most stable public endpoint
-        model_id = "gemini-2.5-flash"
+        # Use gemini-2.0-flash-exp for media inputs as requested/required for multimodal
+        # Use gemini-1.5-flash for text-only for stability/speed
+        if media_data:
+            model_id = "gemini-2.0-flash-exp"
+        else:
+            model_id = "gemini-1.5-flash"
         
         response = client.models.generate_content(
             model=model_id,

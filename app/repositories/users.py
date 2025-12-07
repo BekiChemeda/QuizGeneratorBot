@@ -11,7 +11,7 @@ class UsersRepository:
         return self.collection.find_one({"id": user_id})
 
     def upsert_user(self, user_id: int, username: Optional[str]) -> Dict[str, Any]:
-        now = datetime.utcnow()
+        now = datetime.now()
         update = {
             "$setOnInsert": {
                 "id": user_id,
@@ -24,6 +24,8 @@ class UsersRepository:
                 "last_note_time": None,
                 "default_question_type": "text",
                 "questions_per_note": 5,
+                "invited_by": None,
+                "referral_count": 0,
             },
             "$set": {"username": username} if username else {},
         }
@@ -34,8 +36,35 @@ class UsersRepository:
         self.collection.update_one({"id": user_id}, update, upsert=True)
         return self.get(user_id) or {}
 
+    def set_referrer(self, user_id: int, referrer_id: int) -> bool:
+        """Sets the referrer for a user if not already set. Returns True if successful."""
+        # Prevent self-referral
+        if user_id == referrer_id:
+            return False
+            
+        # Check if user already has a referrer
+        user = self.get(user_id)
+        if user and user.get("invited_by"):
+            return False
+
+        # Set referrer
+        res = self.collection.update_one(
+            {"id": user_id, "invited_by": None},
+            {"$set": {"invited_by": referrer_id}}
+        )
+        
+        if res.modified_count > 0:
+            # Increment referrer's count
+            self.collection.update_one({"id": referrer_id}, {"$inc": {"referral_count": 1}})
+            return True
+        return False
+
+    def get_referral_count(self, user_id: int) -> int:
+        user = self.get(user_id)
+        return user.get("referral_count", 0) if user else 0
+
     def set_premium(self, user_id: int, duration_days: int | None = None) -> None:
-        now = datetime.utcnow()
+        now = datetime.now()
         update: Dict[str, Any] = {"type": "premium", "premium_since": now}
         
         if duration_days:
@@ -63,7 +92,7 @@ class UsersRepository:
         self.collection.update_one({"id": user_id}, {"$inc": {"total_notes": 1}})
 
     def set_last_note_time(self, user_id: int, when: datetime | None = None) -> None:
-        self.collection.update_one({"id": user_id}, {"$set": {"last_note_time": when or datetime.utcnow()}})
+        self.collection.update_one({"id": user_id}, {"$set": {"last_note_time": when or datetime.now()}})
 
     def set_questions_per_note(self, user_id: int, value: int) -> None:
         self.collection.update_one({"id": user_id}, {"$set": {"questions_per_note": value}})
@@ -85,7 +114,7 @@ class UsersRepository:
                 last = None
         if not last:
             return
-        now = datetime.utcnow()
+        now = datetime.now()
         if last.date() != now.date():
             self.collection.update_one({"id": user_id}, {"$set": {"notes_today": 0}})
 

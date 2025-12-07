@@ -11,7 +11,7 @@ def is_premium(user_doc: dict) -> bool:
         return False
     # Check expiry
     expiry = user_doc.get("premium_until")
-    if expiry and expiry < datetime.utcnow():
+    if expiry and expiry < datetime.now():
         return False
     return True
 
@@ -52,7 +52,7 @@ def can_submit_note_now(db: Database, user_id: int, cooldown_seconds: int = 10) 
             last = datetime.fromisoformat(last)
         except Exception:
             return True
-    return datetime.utcnow() - last >= timedelta(seconds=cooldown_seconds)
+    return datetime.now() - last >= timedelta(seconds=cooldown_seconds)
 
 
 def update_last_note_time(db: Database, user_id: int) -> None:

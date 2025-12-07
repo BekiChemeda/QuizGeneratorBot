@@ -24,7 +24,7 @@ class QuizScheduler:
             self.scheduler.shutdown(wait=False)
 
     def _tick(self) -> None:
-        now = datetime.utcnow()
+        now = datetime.now()
         # Claim in small batches to avoid race conditions
         due = list(self.schedules.find({"status": "pending", "scheduled_at": {"$lte": now}}).sort("scheduled_at", 1).limit(10))
         for sched in due:
