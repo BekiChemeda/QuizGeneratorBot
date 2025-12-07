@@ -15,6 +15,8 @@ class Config(BaseModel):
     mongo_uri: str = Field(default_factory=lambda: os.getenv("MONGO_URI", "mongodb://localhost:27017"))
     mongo_db: str = Field(default_factory=lambda: os.getenv("MONGO_DB", "quizbot"))
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    owner_id: int = Field(default=1263404935)
+    owner_id: int = Field(default=1263404935)
 
     force_subscription: bool = Field(default_factory=lambda: os.getenv("FORCE_SUBSCRIPTION", "false").lower() == "true")
     force_channels: List[str] = Field(default_factory=lambda: [c.strip() for c in os.getenv("FORCE_CHANNELS", "").split(",") if c.strip()])
