@@ -6,7 +6,7 @@ import shutil
 from typing import Tuple, Optional, Iterable
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, RequestBlocked
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
@@ -108,10 +108,6 @@ def get_transcript_with_fallback(video_id: str, api: Optional[YouTubeTranscriptA
         raw = formatter.format_transcript(fetched)
         return clean_transcript(raw)
     except (TranscriptsDisabled, NoTranscriptFound):
-        return None
-    except RequestBlocked:
-        # Let caller decide about proxies; surface None but include message
-        print("RequestBlocked: YouTube may be blocking requests from this IP. Consider using residential rotating proxies.")
         return None
     except Exception:
         # If fetch() failed fall back to listing and manual selection
