@@ -29,7 +29,11 @@ from .services.quota import (
     increase_total_notes,
 )
 from .services.scheduler import QuizScheduler
-from .utils import is_subscribed, home_keyboard, format_dt_utc3, from_utc3_to_utc
+from .services.scheduler import QuizScheduler
+from .utils import is_subscribed, home_keyboard, format_dt_utc3, from_utc3_to_utc, notify_admins
+from .logger import logger
+import traceback
+import functools
 
 
 cfg = get_config()
@@ -40,20 +44,45 @@ try:
 except Exception:
     db = None
 
-settings_repo = SettingsRepository(db) if db else None
-users_repo = UsersRepository(db) if db else None
-channels_repo = ChannelsRepository(db) if db else None
-payments_repo = PaymentsRepository(db) if db else None
-schedules_repo = SchedulesRepository(db) if db else None
+settings_repo = SettingsRepository(db) if db is not None else None
+users_repo = UsersRepository(db) if db is not None else None
+channels_repo = ChannelsRepository(db) if db is not None else None
+payments_repo = PaymentsRepository(db) if db is not None else None
+schedules_repo = SchedulesRepository(db) if db is not None else None
 
 bot = TeleBot(cfg.bot_token)
-if db:
+if db is not None:
     scheduler = QuizScheduler(db, bot)
     scheduler.start()
 
 pending_notes: dict[int, dict] = {}
 pending_subscriptions: dict[int, dict] = {}
 pending_keys: dict[int, dict] = {}
+
+
+def error_handler(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            user_id = None
+            if args and isinstance(args[0], (Message, CallbackQuery)):
+                user_id = args[0].from_user.id
+            
+            error_msg = f"Error in {func.__name__}: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            
+            if db is not None:
+                notify_admins(bot, f"⚠️ Error in `{func.__name__}`:\n`{str(e)}`", db)
+            
+            if user_id:
+                try:
+                    bot.send_message(user_id, "An unexpected error occurred. The admins have been notified.")
+                except Exception:
+                    pass
+    return wrapper
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -78,6 +107,7 @@ def main_menu() -> InlineKeyboardMarkup:
 
 
 @bot.message_handler(commands=["start"]) 
+@error_handler
 def handle_start(message: Message):
     user_id = message.chat.id
     username = message.from_user.username or "No"
@@ -221,6 +251,7 @@ def handle_remove_channel(call: CallbackQuery):
 
 # Generate flow
 @bot.callback_query_handler(func=lambda call: call.data == "generate")
+@error_handler
 def handle_generate(call: CallbackQuery):
     user_id = call.from_user.id
     users_repo.reset_notes_if_new_day(user_id)
@@ -375,6 +406,7 @@ def handle_custom_delay(message: Message):
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "sendnow")
+@error_handler
 def send_now(call: CallbackQuery):
     user_id = call.from_user.id
     state = pending_notes.get(user_id)
@@ -755,6 +787,7 @@ def cancel_payment(call: CallbackQuery):
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "confirm_payment")
+@error_handler
 def confirm_payment(call: CallbackQuery):
     user_id = call.from_user.id
     info = pending_subscriptions.get(user_id)

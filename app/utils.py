@@ -58,3 +58,21 @@ def from_utc3_to_utc(dt: datetime) -> datetime:
 
 def format_dt_utc3(dt: datetime, fmt: str = "%Y-%m-%d %H:%M") -> str:
     return to_utc3(dt).strftime(fmt)
+
+
+def notify_admins(bot: TeleBot, message: str, db):
+    """
+    Sends a message to all admins.
+    """
+    if db is None:
+        return
+    
+    try:
+        admins = db["users"].find({"role": "admin"})
+        for admin in admins:
+            try:
+                bot.send_message(admin["id"], f"🚨 **Admin Notification**\n\n{message}", parse_mode="Markdown")
+            except Exception:
+                pass
+    except Exception:
+        pass
