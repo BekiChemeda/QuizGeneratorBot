@@ -163,7 +163,7 @@ def handle_start(message: Message):
         "- Choose between text or quiz mode\n"
         "- Deliver to PM or your channel\n"
         "- Configure delay and schedule delivery\n\n"
-        "Your referral link: https://t.me/{bot.get_me().username}?start=ref{user_id}\n"
+        f"Your referral link: https://t.me/{bot.get_me().username}?start=ref{user_id}\n"
         "Invite 2 users to get Premium!\n\n"
         "Your support makes this bot better!"
     )
