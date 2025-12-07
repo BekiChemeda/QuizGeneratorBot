@@ -46,8 +46,12 @@ cfg = get_config()
 try:
     init_db()
     db = get_db()
-except Exception:
+except Exception as e:
+    logger.error(f"Database connection failed: {e}")
+    logger.error(traceback.format_exc())
     db = None
+    # Fail fast if DB is critical? For now just log.
+    print(f"CRITICAL: Database failed to initialize: {e}")
 
 settings_repo = SettingsRepository(db) if db is not None else None
 users_repo = UsersRepository(db) if db is not None else None
