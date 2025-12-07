@@ -15,7 +15,7 @@ class UsersRepository:
         update = {
             "$setOnInsert": {
                 "id": user_id,
-                "username": username,
+                # "username": username,  <-- Removed to avoid conflict with $set
                 "type": "regular",
                 "role": "user",
                 "registered_at": now,
@@ -27,6 +27,10 @@ class UsersRepository:
             },
             "$set": {"username": username} if username else {},
         }
+        # If username is not provided, ensure it gets set to None on insert
+        if not username:
+             update["$setOnInsert"]["username"] = None
+
         self.collection.update_one({"id": user_id}, update, upsert=True)
         return self.get(user_id) or {}
 
