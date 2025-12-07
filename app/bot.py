@@ -165,7 +165,7 @@ def handle_start(message: Message):
         "✨ Features:\n"
         "- Convert study notes into quizzes\n"
         "- Choose between text or quiz mode\n"
-
+    )
 @bot.callback_query_handler(func=lambda call: call.data == "faq")
 def handle_faq(call: CallbackQuery):
     try:
