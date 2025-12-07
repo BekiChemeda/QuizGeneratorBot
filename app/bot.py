@@ -279,9 +279,58 @@ def got_payment(message):
         notify_admins(bot, f"💰 New Payment (Stars) from {message.from_user.full_name}: {payment.total_amount} XTR", db)
 
 
+
 @bot.callback_query_handler(func=lambda call: call.data == "profile")
 def handle_profile(call: CallbackQuery):
     user_id = call.from_user.id
+    user = users_repo.get(user_id) or {}
+    
+    status = "🌟 Premium" if is_premium(user) else "Regular"
+    role = user.get("role", "user").capitalize()
+    
+    # Quota info
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    used_today = user.get("daily_count", 0)
+    last_date = user.get("last_note_date", "")
+    if last_date != today_str:
+        used_today = 0
+        
+    if is_premium(user):
+        limit_notes = cfg.max_notes_premium
+        limit_questions = cfg.max_questions_premium
+    elif user.get("gemini_api_key"):
+        limit_notes = cfg.max_notes_custom_key
+        limit_questions = cfg.max_questions_custom_key
+    else:
+        limit_notes = cfg.max_notes_regular
+        limit_questions = cfg.max_questions_regular
+
+    referrer_count = user.get("referral_count", 0)
+    
+    msg = (
+        f"👤 **User Profile**\n\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"🔰 Status: **{status}**\n"
+        f"👮 Role: {role}\n\n"
+        f"📊 **Usage (Today)**:\n"
+        f"Notes: {used_today} / {limit_notes}\n"
+        f"Max Questions/Note: {limit_questions}\n\n"
+        f"🔗 **Referrals**: {referrer_count}\n"
+        f"Invite friends to get Premium!"
+    )
+    
+    kb = InlineKeyboardMarkup()
+    if not is_premium(user):
+        kb.add(InlineKeyboardButton("💎 Upgrade to Premium", callback_data="subscribe_premium"))
+    kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+    
+    try:
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, msg, parse_mode="Markdown", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "channels")
 def handle_channels(call: CallbackQuery):
     user_id = call.from_user.id
     user_channels = channels_repo.list_channels(user_id)
