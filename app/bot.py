@@ -259,7 +259,28 @@ def handle_add_admin(message: Message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_menu")
 def handle_admin_menu_btn(call: CallbackQuery):
-    admin_dashboard(call.message)
+    user_id = call.from_user.id
+    # Auth Check
+    admin = users_repo.get(user_id)
+    is_owner = (user_id == cfg.owner_id)
+    if not is_owner and (not admin or admin.get("role") != "admin"):
+        bot.answer_callback_query(call.id, "Not authorized.")
+        return
+    
+    # Admin Dashboard Menu
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
+        InlineKeyboardButton("🔐 Force Subscription", callback_data="admin_manage_sub"),
+        InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
+        InlineKeyboardButton("👥 Manage Users", callback_data="admin_users"),
+        InlineKeyboardButton("🔙 Close", callback_data="close_admin"),
+    )
+    
+    try:
+        bot.edit_message_text("🔧 **Admin Dashboard**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, "🔧 **Admin Dashboard**", parse_mode="Markdown", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_manage_sub")
 def handle_admin_manage_sub(call: CallbackQuery):
