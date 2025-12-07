@@ -800,10 +800,6 @@ def handle_generate(call: CallbackQuery):
         bot.answer_callback_query(call.id, "You have reached your daily limit. Add your own Gemini API key in Settings to increase limits.")
         return
 
-    if not can_submit_note_now(db, user_id, cooldown_seconds=10):
-        bot.answer_callback_query(call.id, "Please wait a few seconds before sending another note.")
-        return
-
     pending_notes[user_id] = {"stage": "await_input_type"}
     bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
@@ -1166,10 +1162,6 @@ def send_now(call: CallbackQuery):
 
     if not has_quota(db, user_id):
         bot.answer_callback_query(call.id, "Daily quota reached")
-        return
-
-    if not can_submit_note_now(db, user_id, cooldown_seconds=10):
-        bot.answer_callback_query(call.id, "Wait a few seconds before next note")
         return
 
     update_last_note_time(db, user_id)
