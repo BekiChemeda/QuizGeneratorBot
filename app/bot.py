@@ -557,7 +557,7 @@ def handle_generate(call: CallbackQuery):
     bot.send_message(user_id, "Choose input type:" + tip, reply_markup=kb)
 
 
-@bot.callback_query_handler(func=lambda call: call.data in ["input_note", "input_title", "input_file"])
+@bot.callback_query_handler(func=lambda call: call.data in ["input_note", "input_title", "input_file", "input_youtube", "input_audio"])
 def handle_input_choice(call: CallbackQuery):
     user_id = call.from_user.id
     if user_id not in pending_notes:

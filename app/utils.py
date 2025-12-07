@@ -31,8 +31,14 @@ def is_subscribed(bot: TeleBot, user_id: int) -> bool:
 
 def home_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("🔙home", callback_data="home"))
+    kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
     return kb
+
+def main_menu(user_id: int) -> InlineKeyboardMarkup:
+    # Placeholder to avoid import error circular dependency
+    # The actual main_menu is defined in bot.py to use callbacks
+    # This might be used by other modules if needed, but for now we keep it simple
+    return home_keyboard()
 
 
 # Time utilities: enforce UTC+3 for display and scheduling inputs
