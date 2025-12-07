@@ -108,6 +108,7 @@ def main_menu(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("📢 My Channels", callback_data="channels"),
         InlineKeyboardButton("📂 My Quizzes", callback_data="my_quizzes"),
         InlineKeyboardButton("⏰ Schedule", callback_data="schedule_menu"),
+        InlineKeyboardButton("📊 Features", callback_data="features"),
         InlineKeyboardButton("ℹ️ About", callback_data="about"),
         InlineKeyboardButton("🆘 FAQs", callback_data="faq"),
         InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
@@ -139,14 +140,8 @@ def handle_start(message: Message):
             # Notify referrer
             try:
                 bot.send_message(referrer_id, f"🎉 New user {username} joined via your link!")
-                # Check for reward
-                count = users_repo.get_referral_count(referrer_id)
-                target = 2 # hardcoded for now, move to settings
-                if count >= target:
-                    # Grant premium for 30 days? Or permanent? User said "users can be premium... by inviting 2 users"
-                    # Let's give 30 days for every 2 invites tailored logic can be refined
-                    users_repo.set_premium(referrer_id, duration_days=30)
-                    bot.send_message(referrer_id, f"🌟 You have invited {count} users! You've been granted 30 days of Premium!", parse_mode="HTML")
+                # Check for milestone rewards
+                users_repo.check_and_reward_referral_milestone(referrer_id, bot, settings_repo)
             except Exception:
                 pass # Referral notification failed (blocked bot etc)
 
@@ -226,19 +221,49 @@ def handle_about(call: CallbackQuery):
     )
     bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=home_keyboard())
 
-# Correction: The search results showed main_menu() in handle_start (already fixed in snippet 546 but maybe not applied if I edited blindly? No, snippet 546 looked good).
-# But search results showed `reply_markup=main_menu()` in handle_start at line 178 (in search output context, though line numbers drift).
-# Also line 520 (cancel_payment) uses home_keyboard().
-# Line 587 (confirm_payment) uses home_keyboard().
-# So the main culprit is handle_start if it wasn't updated, or handle_home if it calls main_menu().
-# Wait, handle_home calls handle_start usually? 
-# "def handle_home(call): ... handle_start(call.message)" -> This is safe if handle_start extracts user_id correctly.
-# But if handle_home calls main_menu() directly...
 
-# Looking at line 1400 (search result for `text, parse_mode="HTML", reply_markup=main_menu())`):
-# That looks like handle_start.
-
-# Let's fix handle_start and any other direct calls.
+@bot.callback_query_handler(func=lambda call: call.data == "features")
+def handle_features(call: CallbackQuery):
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    
+    text = (
+        "📊 <b>Feature Comparison</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>🆓 FREE USERS</b>\n"
+        "• 5 quizzes per day\n"
+        "• Text notes only\n"
+        "• PDF/TXT/DOCX files\n"
+        "• Up to 100 questions\n"
+        "• View last 2 saved quizzes\n"
+        "• Text or Poll mode\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>🔑 WITH CUSTOM API KEY</b>\n"
+        "• 50 quizzes per day\n"
+        "• All free features\n"
+        "• Up to 300 questions\n"
+        "• No Gemini API costs from bot\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>⭐ PREMIUM USERS</b>\n"
+        "• 10 quizzes per day\n"
+        "• All free features\n"
+        "• 🎥 YouTube video quizzes\n"
+        "• 🎵 Audio file quizzes\n"
+        "• PPT/PPTX support\n"
+        "• Up to 150 questions\n"
+        "• View all saved quizzes\n"
+        "• Export to PDF/DOCX/TXT\n"
+        "• Priority support\n\n"
+        "💡 <i>Get Premium by inviting friends or subscribing!</i>"
+    )
+    
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("💎 Get Premium", callback_data="subscribe_premium"))
+    kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+    
+    bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=kb)
 
 
 @bot.message_handler(commands=["addadmin"])
@@ -270,6 +295,7 @@ def handle_admin_menu_btn(call: CallbackQuery):
     # Admin Dashboard Menu
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
+        InlineKeyboardButton("📊 Settings Overview", callback_data="admin_settings_overview"),
         InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
         InlineKeyboardButton("🔐 Force Subscription", callback_data="admin_manage_sub"),
         InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
@@ -373,6 +399,72 @@ def handle_add_force_channel_msg(message: Message):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🔙 Manage Subs", callback_data="admin_manage_sub"))
     bot.send_message(user_id, "Channel added.", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_settings_overview")
+def handle_admin_settings_overview(call: CallbackQuery):
+    user_id = call.from_user.id
+    # Auth Check
+    admin = users_repo.get(user_id)
+    is_owner = (user_id == cfg.owner_id)
+    if not is_owner and (not admin or admin.get("role") != "admin"):
+        bot.answer_callback_query(call.id, "Not authorized.")
+        return
+    
+    # Get all settings
+    sr = SettingsRepository(db) if db is not None else None
+    
+    # Premium & Payment
+    premium_price = sr.get("premium_price", cfg.premium_price) if sr else cfg.premium_price
+    payment_channel = sr.get("payment_channel", cfg.payment_channel) if sr else cfg.payment_channel
+    
+    # Force Subscription
+    force_sub = sr.get("force_subscription", cfg.force_subscription) if sr else cfg.force_subscription
+    force_channels = sr.get("force_channels", cfg.force_channels) if sr else cfg.force_channels
+    
+    # Limits
+    max_notes_regular = sr.get("max_notes_regular", cfg.max_notes_regular) if sr else cfg.max_notes_regular
+    max_notes_premium = sr.get("max_notes_premium", cfg.max_notes_premium) if sr else cfg.max_notes_premium
+    max_notes_custom = sr.get("max_notes_custom_key", cfg.max_notes_custom_key) if sr else cfg.max_notes_custom_key
+    
+    max_q_regular = sr.get("max_questions_regular", cfg.max_questions_regular) if sr else cfg.max_questions_regular
+    max_q_premium = sr.get("max_questions_premium", cfg.max_questions_premium) if sr else cfg.max_questions_premium
+    max_q_custom = sr.get("max_questions_custom_key", cfg.max_questions_custom_key) if sr else cfg.max_questions_custom_key
+    
+    # Referral (future feature - placeholder)
+    referral_target = sr.get("referral_target", 2) if sr else 2
+    referral_reward_days = sr.get("referral_reward_days", 30) if sr else 30
+    
+    text = (
+        "📊 **Current Settings Overview**\n\n"
+        "**💰 Premium & Payment:**\n"
+        f"• Premium Price: {premium_price} ETB\n"
+        f"• Payment Channel: {payment_channel or 'Not set'}\n\n"
+        "**🔐 Force Subscription:**\n"
+        f"• Status: {'✅ Enabled' if force_sub else '❌ Disabled'}\n"
+        f"• Required Channels: {len(force_channels)}\n"
+        f"  {', '.join(force_channels) if force_channels else 'None'}\n\n"
+        "**📊 Daily Limits (Quizzes):**\n"
+        f"• Free Users: {max_notes_regular}\n"
+        f"• Premium Users: {max_notes_premium}\n"
+        f"• Custom API Key: {max_notes_custom}\n\n"
+        "**❓ Max Questions Per Quiz:**\n"
+        f"• Free Users: {max_q_regular}\n"
+        f"• Premium Users: {max_q_premium}\n"
+        f"• Custom API Key: {max_q_custom}\n\n"
+        "**🎁 Referral Rewards:**\n"
+        f"• Target: {referral_target} invites\n"
+        f"• Reward: {referral_reward_days} days premium\n\n"
+        "_Use the admin menu buttons to modify these settings._"
+    )
+    
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
+    
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
 
 
 @bot.message_handler(commands=["addpremium"])
@@ -824,17 +916,24 @@ def handle_youtube_submission(message: Message):
     url = message.text or ""
     processing = bot.reply_to(message, "Fetching content (Transcript or Audio)...")
     try:
-        text, audio_data, mime_type = get_youtube_transcript(url)
+        text, audio_data, mime_type, video_title, video_description = get_youtube_transcript(url)
         bot.delete_message(message.chat.id, processing.message_id)
+        
+        # Use video title as the quiz title
+        if video_title:
+            pending_notes[user_id]["title"] = video_title
         
         if text:
             pending_notes[user_id]["note"] = text
-            pending_notes[user_id]["title"] = "YouTube Video"
-            bot.reply_to(message, "✅ Transcript fetched successfully!")
+            bot.reply_to(message, "✅ Transcript fetched successfully.")
         elif audio_data:
             pending_notes[user_id]["media_data"] = audio_data
             pending_notes[user_id]["mime_type"] = mime_type
-            pending_notes[user_id]["title"] = "YouTube Audio"
+            # Add video description as context if available
+            if video_description:
+                # Truncate description to reasonable length
+                context = video_description[:500] if len(video_description) > 500 else video_description
+                pending_notes[user_id]["note"] = f"Video Description: {context}"
             bot.reply_to(message, "✅ Audio downloaded successfully (Transcript unavailable).")
         else:
              bot.send_message(user_id, "Could not fetch content. Video might be restricted or too long.")

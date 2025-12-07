@@ -74,10 +74,15 @@ Source:
 
         contents = []
         if media_data and mime_type:
+            # For media (audio/video), provide better context
+            media_context = "Analyze the audio/video content below and generate questions based on what is discussed, explained, or presented in the media."
+            if safe_title:
+                media_context += f"\nContext: {safe_title}"
+            
             contents.append(types.Content(
                 parts=[
                     types.Part.from_bytes(data=media_data, mime_type=mime_type),
-                    types.Part.from_text(text=prompt_text)
+                    types.Part.from_text(text=f"{media_context}\n\n{prompt_text}")
                 ]
             ))
         else:

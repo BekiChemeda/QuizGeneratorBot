@@ -58,6 +58,54 @@ class UsersRepository:
             self.collection.update_one({"id": referrer_id}, {"$inc": {"referral_count": 1}})
             return True
         return False
+    
+    def check_and_reward_referral_milestone(self, user_id: int, bot, settings_repo) -> bool:
+        """
+        Check if user reached a referral milestone and award premium.
+        Returns True if milestone was reached and reward given.
+        """
+        user = self.get(user_id)
+        if not user:
+            return False
+        
+        referral_count = user.get("referral_count", 0)
+        milestones_reached = user.get("referral_milestones_reached", [])
+        
+        # Get settings from DB or use defaults
+        referral_target = settings_repo.get("referral_target", 10) if settings_repo else 10
+        referral_reward_days = settings_repo.get("referral_reward_days", 15) if settings_repo else 15
+        
+        # Calculate current milestone (e.g., if target is 10: milestone 1 = 10, milestone 2 = 20, etc.)
+        current_milestone = (referral_count // referral_target)
+        
+        # Check if this milestone hasn't been rewarded yet
+        if current_milestone > 0 and current_milestone not in milestones_reached:
+            # Award premium
+            self.set_premium(user_id, referral_reward_days)
+            
+            # Mark milestone as reached
+            milestones_reached.append(current_milestone)
+            self.collection.update_one(
+                {"id": user_id},
+                {"$set": {"referral_milestones_reached": milestones_reached}}
+            )
+            
+            # Notify user
+            try:
+                bot.send_message(
+                    user_id,
+                    f"🎉 **Congratulations!**\n\n"
+                    f"You've invited {referral_count} users and reached milestone {current_milestone}!\n"
+                    f"You've been awarded **{referral_reward_days} days of Premium**! 🌟\n\n"
+                    f"Keep inviting to earn more rewards!",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+            
+            return True
+        
+        return False
 
     def get_referral_count(self, user_id: int) -> int:
         user = self.get(user_id)
