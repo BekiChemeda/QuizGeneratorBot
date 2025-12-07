@@ -5,19 +5,31 @@ from ..repositories.users import UsersRepository
 
 
 def is_premium(user_doc: dict) -> bool:
-    return (user_doc or {}).get("type") == "premium"
+    if not user_doc:
+        return False
+    if user_doc.get("type") != "premium":
+        return False
+    # Check expiry
+    expiry = user_doc.get("premium_until")
+    if expiry and expiry < datetime.utcnow():
+        return False
+    return True
 
 
 def has_quota(db: Database, user_id: int) -> bool:
     cfg = get_config()
     users_repo = UsersRepository(db)
     user = users_repo.get(user_id) or {}
-    # If user has no personal Gemini key, reduce daily quota to 2
+    
+    # If user has personal Gemini key, use custom key limit
     personal_key = user.get("gemini_api_key")
-    if not personal_key or not str(personal_key).strip():
-        max_notes = 2
+    if personal_key and str(personal_key).strip():
+        max_notes = cfg.max_notes_custom_key
     else:
-        max_notes = cfg.max_notes_premium if is_premium(user) else cfg.max_notes_regular
+        # Standard limits
+        is_prem = is_premium(user)
+        max_notes = cfg.max_notes_premium if is_prem else cfg.max_notes_regular
+        
     return int(user.get("notes_today", 0)) < int(max_notes)
 
 

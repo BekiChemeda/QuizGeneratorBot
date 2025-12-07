@@ -29,6 +29,21 @@ def _read_docx_bytes(data: bytes) -> str:
         return ""
 
 
+def _read_ppt_bytes(data: bytes) -> str:
+    try:
+        import pptx  # type: ignore
+        with io.BytesIO(data) as fh:
+            presentation = pptx.Presentation(fh)
+            text_runs = []
+            for slide in presentation.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text_runs.append(shape.text)
+            return "\n".join(text_runs)
+    except Exception:
+        return ""
+
+
 def _read_txt_bytes(data: bytes) -> str:
     try:
         return data.decode("utf-8", errors="ignore")
@@ -75,6 +90,8 @@ def fetch_and_parse_file(bot: TeleBot, db: Database, message: Message) -> Tuple[
         text = _read_docx_bytes(file_bytes)
     elif doc.file_name and doc.file_name.lower().endswith(".docx"):
         text = _read_docx_bytes(file_bytes)
+    elif doc.mime_type and ("powerpoint" in doc.mime_type.lower() or "presentation" in doc.mime_type.lower()) or (doc.file_name and doc.file_name.lower().endswith((".ppt", ".pptx"))):
+        text = _read_ppt_bytes(file_bytes)
     else:
         # treat as text
         text = _read_txt_bytes(file_bytes)

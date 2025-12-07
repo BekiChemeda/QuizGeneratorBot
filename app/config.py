@@ -23,8 +23,10 @@ class Config(BaseModel):
 
     max_notes_regular: int = Field(default_factory=lambda: int(os.getenv("MAX_NOTES_REGULAR", "5")))
     max_notes_premium: int = Field(default_factory=lambda: int(os.getenv("MAX_NOTES_PREMIUM", "10")))
-    max_questions_regular: int = Field(default_factory=lambda: int(os.getenv("MAX_QUESTIONS_REGULAR", "5")))
-    max_questions_premium: int = Field(default_factory=lambda: int(os.getenv("MAX_QUESTIONS_PREMIUM", "10")))
+    max_notes_custom_key: int = Field(default_factory=lambda: int(os.getenv("MAX_NOTES_CUSTOM_KEY", "50")))
+    max_questions_regular: int = Field(default_factory=lambda: int(os.getenv("MAX_QUESTIONS_REGULAR", "100")))
+    max_questions_premium: int = Field(default_factory=lambda: int(os.getenv("MAX_QUESTIONS_PREMIUM", "150")))
+    max_questions_custom_key: int = Field(default_factory=lambda: int(os.getenv("MAX_QUESTIONS_CUSTOM_KEY", "300")))
 
     question_type_default: str = Field(default_factory=lambda: os.getenv("QUESTION_TYPE_DEFAULT", "text"))
     maintenance_mode: bool = Field(default_factory=lambda: os.getenv("MAINTENANCE_MODE", "false").lower() == "true")

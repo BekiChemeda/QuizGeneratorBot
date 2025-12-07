@@ -1,5 +1,5 @@
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from pymongo.database import Database
 
 
@@ -34,11 +34,19 @@ class UsersRepository:
         self.collection.update_one({"id": user_id}, update, upsert=True)
         return self.get(user_id) or {}
 
-    def set_premium(self, user_id: int, days: int) -> None:
+    def set_premium(self, user_id: int, duration_days: int | None = None) -> None:
         now = datetime.utcnow()
+        update: Dict[str, Any] = {"type": "premium", "premium_since": now}
+        
+        if duration_days:
+            expiry = now + timedelta(days=duration_days)
+            update["premium_until"] = expiry
+        else:
+            update["premium_until"] = None  # Permanent
+
         self.collection.update_one(
             {"id": user_id},
-            {"$set": {"type": "premium", "premium_since": now}},
+            {"$set": update},
             upsert=True,
         )
 
@@ -90,3 +98,9 @@ class UsersRepository:
         doc = self.get(user_id) or {}
         key = doc.get("gemini_api_key")
         return key if isinstance(key, str) and key.strip() else None
+
+    def set_admin(self, user_id: int) -> None:
+        self.collection.update_one({"id": user_id}, {"$set": {"role": "admin"}})
+
+    def revoke_admin(self, user_id: int) -> None:
+        self.collection.update_one({"id": user_id}, {"$set": {"role": "user"}})

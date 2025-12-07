@@ -18,8 +18,12 @@ from .repositories.channels import ChannelsRepository
 from .repositories.payments import PaymentsRepository
 from .repositories.schedules import SchedulesRepository
 from .repositories.stats import StatsRepository
+from .repositories.quizzes import QuizzesRepository
+from .services.exporter import QuizExporter
 from .services.gemini import generate_questions, validate_gemini_api_key
 from .services.file_parser import fetch_and_parse_file, chunk_text
+
+from .services.youtube_service import get_youtube_transcript
 from .services.quota import (
     has_quota,
     can_submit_note_now,
@@ -27,6 +31,7 @@ from .services.quota import (
     reset_notes_if_new_day,
     increment_quota,
     increase_total_notes,
+    is_premium
 )
 from .services.scheduler import QuizScheduler
 from .services.scheduler import QuizScheduler
@@ -48,7 +53,9 @@ settings_repo = SettingsRepository(db) if db is not None else None
 users_repo = UsersRepository(db) if db is not None else None
 channels_repo = ChannelsRepository(db) if db is not None else None
 payments_repo = PaymentsRepository(db) if db is not None else None
+payments_repo = PaymentsRepository(db) if db is not None else None
 schedules_repo = SchedulesRepository(db) if db is not None else None
+quizzes_repo = QuizzesRepository(db) if db is not None else None
 
 bot = TeleBot(cfg.bot_token)
 if db is not None:
@@ -93,6 +100,7 @@ def main_menu() -> InlineKeyboardMarkup:
     )
     kb.row(
         InlineKeyboardButton("📢 My Channels", callback_data="channels"),
+        InlineKeyboardButton("📂 My Quizzes", callback_data="my_quizzes"),
         InlineKeyboardButton("⏰ Schedule", callback_data="schedule_menu"),
     )
     kb.row(
@@ -136,36 +144,118 @@ def handle_start(message: Message):
     bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu())
 
 
+@bot.message_handler(commands=["addadmin"])
+def handle_add_admin(message: Message):
+    if message.from_user.id != cfg.owner_id:
+        return
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "Usage: /addadmin <user_id>")
+            return
+        target_id = int(args[1])
+        users_repo.set_admin(target_id)
+        bot.reply_to(message, f"User {target_id} is now an admin.")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+
+@bot.message_handler(commands=["removeadmin"])
+def handle_remove_admin(message: Message):
+    if message.from_user.id != cfg.owner_id:
+        return
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "Usage: /removeadmin <user_id>")
+            return
+        target_id = int(args[1])
+        users_repo.revoke_admin(target_id)
+        bot.reply_to(message, f"User {target_id} is no longer an admin.")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+
+@bot.message_handler(commands=["addpremium"])
+def handle_add_premium(message: Message):
+    user_id = message.from_user.id
+    user = users_repo.get(user_id)
+    if not user or (user.get("role") != "admin" and user_id != cfg.owner_id):
+        return
+
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "Usage: /addpremium <user_id> [days]")
+            return
+        
+        target_id = int(args[1])
+        duration = int(args[2]) if len(args) > 2 else None
+        
+        users_repo.set_premium(target_id, duration)
+        dur_str = f"{duration} days" if duration else "Permanent"
+        bot.reply_to(message, f"User {target_id} is now Premium ({dur_str}).")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+
+
+# Payment Handlers (Telegram Stars)
+@bot.callback_query_handler(func=lambda call: call.data == "upgrade_premium")
+def handle_upgrade_premium(call: CallbackQuery):
+    user_id = call.from_user.id
+    title = "Premium Subscription (30 Days)"
+    description = "Unlock all features: Unlimited quizzes (fair use), YouTube/Audio support, Exports, higher limits."
+    payload = f"premium_30_{user_id}"
+    currency = "XTR" # Stars
+    price = 100 # 100 Stars (example price, can be configured)
+    
+    # Note: send_invoice for Stars (Digital Goods) requires 'XTR' currency
+    # and provider_token is usually empty for Stars if using BotFather's setup for Stars?
+    # Actually, for Stars specifically, we use a specific price object labeled in XTR.
+    # Telebot 4.22 supports Stars via `LabeledPrice` with amount.
+    
+    from telebot.types import LabeledPrice
+    prices = [LabeledPrice(label="30 Days Premium", amount=price)]
+    
+    try:
+        bot.send_invoice(
+            chat_id=user_id,
+            title=title,
+            description=description,
+            invoice_payload=payload,
+            provider_token="", # Empty for Stars
+            currency="XTR",
+            prices=prices,
+            start_parameter="premium-upgrade"
+        )
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Error creating invoice: {e}", show_alert=True)
+
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+
+@bot.message_handler(content_types=['successful_payment'])
+def got_payment(message):
+    payment = message.successful_payment
+    user_id = message.from_user.id
+    payload = payment.invoice_payload # e.g. "premium_30_123"
+    
+    if payload.startswith("premium_"):
+        parts = payload.split("_")
+        days = int(parts[1])
+        users_repo.set_premium(user_id, days)
+        bot.send_message(user_id, f"🎉 Payment successful! You assume Premium status for {days} days.\nReference: {payment.telegram_payment_charge_id}")
+        # Notify admins?
+        notify_admins(bot, f"💰 New Payment (Stars) from {message.from_user.full_name}: {payment.total_amount} XTR", db)
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "profile")
 def handle_profile(call: CallbackQuery):
     user_id = call.from_user.id
-    user = users_repo.get(user_id)
-    if not user:
-        bot.answer_callback_query(call.id, "User not found. Press /start")
-        return
-
-    premium_status = "Premium" if user.get("type") == "premium" else "Free"
-    premium_since = user.get("premium_since")
-    premium_since_str = premium_since.strftime("%Y-%m-%d") if premium_since else "N/A"
-
-    text = (
-        f"<b>User Profile</b>\n"
-        f"<b>Name:</b> {call.from_user.full_name} <b>ID:</b> <code>{user_id}</code>\n"
-        f"<b>Registered At:</b> {user.get('registered_at','')}\n"
-        f"<b>Status:</b> {premium_status}\n"
-        f"<b>Premium Since:</b> {premium_since_str}\n"
-        f"<b>Last Used:</b> {user.get('last_note_time','Never')}\n"
-        f"<b>Notes Today:</b> {user.get('notes_today',0)}\n"
-        f"<b>Total Notes:</b> {user.get('total_notes',0)}\n"
-        f"<b>Question Type:</b> {user.get('default_question_type','text').capitalize()}\n"
-        f"<b>Questions Per Note:</b> {user.get('questions_per_note',5)}\n"
-    )
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=home_keyboard())
-
-
-# Channels Management
-@bot.callback_query_handler(func=lambda call: call.data == "channels")
 def handle_channels(call: CallbackQuery):
     user_id = call.from_user.id
     user_channels = channels_repo.list_channels(user_id)
@@ -249,6 +339,109 @@ def handle_remove_channel(call: CallbackQuery):
     handle_channels(call)
 
 
+# Quizzes Management
+@bot.callback_query_handler(func=lambda call: call.data == "my_quizzes")
+def handle_my_quizzes(call: CallbackQuery):
+    user_id = call.from_user.id
+    user = users_repo.get(user_id) or {}
+    is_prem = is_premium(user)
+    
+    # If not premium, only fetch last 2. If premium, fetch last 20 (pagination later if needed)
+    limit = 20 if is_prem else 2
+    quizzes = quizzes_repo.get_user_quizzes(user_id, limit=limit)
+    
+    kb = InlineKeyboardMarkup(row_width=1)
+    for q in quizzes:
+        title = q.get("title", "Quiz")
+        created = q.get("created_at").strftime("%Y-%m-%d") if q.get("created_at") else ""
+        kb.add(InlineKeyboardButton(f"📄 {title} ({created})", callback_data=f"viewquiz_{q['_id']}"))
+    
+    if not quizzes:
+        kb.add(InlineKeyboardButton("No saved quizzes found", callback_data="settings")) # Dummy
+
+    if not is_prem:
+        kb.add(InlineKeyboardButton("🔒 Upgrade to see all", callback_data="settings")) # Placeholder link
+
+    kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+    
+    text = "<b>My Quizzes</b>\nSelect a quiz to view or export."
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("viewquiz_"))
+def handle_view_quiz(call: CallbackQuery):
+    user_id = call.from_user.id
+    quiz_id = call.data.split("_")[1]
+    quiz = quizzes_repo.get_quiz(quiz_id)
+    
+    if not quiz:
+        bot.answer_callback_query(call.id, "Quiz not found")
+        return
+
+    text = f"<b>{quiz.get('title')}</b>\n"
+    text += f"Questions: {len(quiz.get('questions', []))}\n"
+    text += f"Date: {quiz.get('created_at')}\n"
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    # Exports
+    kb.add(InlineKeyboardButton("📄 Export PDF", callback_data=f"exp_{quiz_id}_pdf"))
+    kb.add(InlineKeyboardButton("📝 Export DOCX", callback_data=f"exp_{quiz_id}_docx"))
+    kb.add(InlineKeyboardButton("📃 Export TXT", callback_data=f"exp_{quiz_id}_txt"))
+    kb.add(InlineKeyboardButton("🔙 Back", callback_data="my_quizzes"))
+
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("exp_"))
+def handle_export_quiz(call: CallbackQuery):
+    user_id = call.from_user.id
+    user = users_repo.get(user_id) or {}
+    
+    # Check premium
+    if not is_premium(user) and user.get("role") != "admin" and user_id != cfg.owner_id:
+        bot.answer_callback_query(call.id, "Export is a Premium feature!", show_alert=True)
+        return
+
+    parts = call.data.split("_")
+    quiz_id = parts[1]
+    fmt = parts[2]
+    
+    quiz = quizzes_repo.get_quiz(quiz_id)
+    if not quiz:
+        bot.answer_callback_query(call.id, "Quiz not found")
+        return
+
+    processing = bot.send_message(user_id, "Generating file...")
+    try:
+        title = quiz.get("title", "Quiz")
+        questions = quiz.get("questions", [])
+        
+        file_io = None
+        filename = f"{title[:20]}_{fmt}.{fmt}".replace(" ", "_")
+        
+        if fmt == "pdf":
+            file_io = QuizExporter.to_pdf(title, questions)
+        elif fmt == "docx":
+            file_io = QuizExporter.to_docx(title, questions)
+        elif fmt == "txt":
+            file_io = QuizExporter.to_txt(title, questions)
+            
+        if file_io:
+            bot.send_document(user_id, (filename, file_io))
+            bot.delete_message(user_id, processing.message_id)
+        else:
+            bot.embed_message_text("Export failed.", user_id, processing.message_id)
+
+    except Exception as e:
+        bot.edit_message_text(f"Export Error: {e}", user_id, processing.message_id)
+
+
 # Generate flow
 @bot.callback_query_handler(func=lambda call: call.data == "generate")
 @error_handler
@@ -272,10 +465,11 @@ def handle_generate(call: CallbackQuery):
     pending_notes[user_id] = {"stage": "await_input_type"}
     bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
         InlineKeyboardButton("📝 Use a Note", callback_data="input_note"),
         InlineKeyboardButton("🏷️ Title Only", callback_data="input_title"),
-        InlineKeyboardButton("📄 File (PDF/DOCX/TXT) [Premium]", callback_data="input_file"),
+        InlineKeyboardButton("📄 File (PDF/DOCX/TXT/PPT) [Premium]", callback_data="input_file"),
+        InlineKeyboardButton("📺 YouTube [Premium]", callback_data="input_youtube"),
+        InlineKeyboardButton("🎙️ Audio [Premium]", callback_data="input_audio"),
         InlineKeyboardButton("🔙 Home", callback_data="home"),
     )
     tip = ""
@@ -285,13 +479,152 @@ def handle_generate(call: CallbackQuery):
     bot.send_message(user_id, "Choose input type:" + tip, reply_markup=kb)
 
 
+@bot.callback_query_handler(func=lambda call: call.data in ["input_note", "input_title", "input_file"])
+def handle_input_choice(call: CallbackQuery):
+    user_id = call.from_user.id
+    if user_id not in pending_notes:
+        bot.answer_callback_query(call.id, "Session expired.")
+        return
+    
+    choice = call.data
+    if choice == "input_note":
+        pending_notes[user_id]["stage"] = "await_note"
+        bot.send_message(user_id, "Please send your note now.")
+    elif choice == "input_title":
+        pending_notes[user_id]["stage"] = "await_title"
+        bot.send_message(user_id, "Please send the topic/title.")
+    elif choice == "input_file":
+        pending_notes[user_id]["stage"] = "await_file"
+        bot.send_message(user_id, "Please upload your file (PDF, DOCX, TXT, PPT).")
+    elif choice == "input_youtube":
+        user = users_repo.get(user_id) or {}
+        if not is_premium(user) and user.get("role") != "admin" and user_id != cfg.owner_id:
+             bot.answer_callback_query(call.id, "Premium feature only!", show_alert=True)
+             return
+        pending_notes[user_id]["stage"] = "await_youtube"
+        bot.send_message(user_id, "Please send a YouTube video link.")
+    elif choice == "input_audio":
+        user = users_repo.get(user_id) or {}
+        if not is_premium(user) and user.get("role") != "admin" and user_id != cfg.owner_id:
+             bot.answer_callback_query(call.id, "Premium feature only!", show_alert=True)
+             return
+        pending_notes[user_id]["stage"] = "await_audio"
+        bot.send_message(user_id, "Please send an audio file (Voice Note or MP3/OGG/WAV). English Only.")
+    
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+def ask_difficulty(user_id: int):
+    # Ask Difficulty
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("🟢 Beginner", callback_data="diff_Beginner"),
+        InlineKeyboardButton("🟡 Medium", callback_data="diff_Medium"),
+        InlineKeyboardButton("🔴 Hard", callback_data="diff_Hard"),
+        InlineKeyboardButton("🔙 Home", callback_data="home"),
+    )
+    pending_notes[user_id]["stage"] = "choose_difficulty"
+    bot.send_message(user_id, "Choose difficulty:", reply_markup=kb)
+
+
+@bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_title")
+def handle_title_submission(message: Message):
+    user_id = message.from_user.id
+    title = message.text or ""
+    pending_notes[user_id]["title"] = title
+    ask_difficulty(user_id)
+
+
+@bot.message_handler(content_types=["document"], func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_file")
+@error_handler
+def handle_file_submission(message: Message):
+    user_id = message.from_user.id
+    try:
+        text, filename = fetch_and_parse_file(bot, db, message)
+        pending_notes[user_id]["file_content"] = text
+        pending_notes[user_id]["file_name"] = filename
+        bot.reply_to(message, f"File parsed: {filename}")
+        ask_difficulty(user_id)
+    except ValueError as e:
+        bot.reply_to(message, f"Error: {e}")
+    except Exception as e:
+        bot.reply_to(message, "Failed to process file.")
+
+
 @bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_note")
 def handle_note_submission(message: Message):
     user_id = message.from_user.id
     note = message.text or ""
     pending_notes[user_id]["note"] = note
+    ask_difficulty(user_id)
 
-    # Destination choices: PM or one of user's channels
+
+@bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_youtube")
+@error_handler
+def handle_youtube_submission(message: Message):
+    user_id = message.from_user.id
+    url = message.text or ""
+    processing = bot.reply_to(message, "Fetching transcript...")
+    try:
+        text = get_youtube_transcript(url)
+        if not text:
+             bot.edit_message_text("Could not fetch transcript. Is the video valid/captioned?", message.chat.id, processing.message_id)
+             return
+        bot.delete_message(message.chat.id, processing.message_id)
+        
+        pending_notes[user_id]["note"] = text
+        pending_notes[user_id]["title"] = "YouTube Video"
+        bot.reply_to(message, "Transcript fetched successfully!")
+        ask_difficulty(user_id)
+    except Exception as e:
+        bot.edit_message_text(f"Error fetching transcript: {str(e)}", message.chat.id, processing.message_id)
+
+
+@bot.message_handler(content_types=["audio", "voice"], func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_audio")
+@error_handler
+def handle_audio_submission(message: Message):
+    user_id = message.from_user.id
+    
+    file_id = message.voice.file_id if message.voice else message.audio.file_id
+    mime_type = message.voice.mime_type if message.voice else message.audio.mime_type
+    
+    # Downloading is heavy; restrict size? 20MB limit in bot settings/API usually.
+    # Telebot download.
+    processing = bot.reply_to(message, "Downloading audio (this may take a moment)...")
+    try:
+        file_info = bot.get_file(file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        
+        if not downloaded_file:
+             raise ValueError("Download failed")
+             
+        pending_notes[user_id]["media_data"] = downloaded_file
+        pending_notes[user_id]["mime_type"] = mime_type or "audio/ogg" # Voice notes often ogg
+        pending_notes[user_id]["title"] = "Audio Note"
+        
+        bot.delete_message(message.chat.id, processing.message_id)
+        bot.reply_to(message, "Audio received!")
+        ask_difficulty(user_id)
+    except Exception as e:
+         bot.edit_message_text(f"Error processing audio: {str(e)}", message.chat.id, processing.message_id)
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("diff_"))
+def handle_difficulty_selection(call: CallbackQuery):
+    user_id = call.from_user.id
+    state = pending_notes.get(user_id)
+    if not state:
+        bot.answer_callback_query(call.id, "Session expired.")
+        return
+
+    diff = call.data.split("_")[1]
+    state["difficulty"] = diff
+    
+    # Now ask destination
     user_channels = channels_repo.list_channels(user_id)
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("🔁 Allow Beyond Note", callback_data="toggle_beyond_yes"))
@@ -301,8 +634,12 @@ def handle_note_submission(message: Message):
         kb.add(InlineKeyboardButton(f"📣 {label}", callback_data=f"dst_ch_{ch['chat_id']}"))
     kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
 
-    pending_notes[user_id]["stage"] = "choose_destination"
-    bot.send_message(user_id, "Choose where to send the quiz:", reply_markup=kb)
+    state["stage"] = "choose_destination"
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    bot.send_message(user_id, f"Difficulty: {diff}\nChoose where to send the quiz:", reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_beyond_"))
@@ -417,8 +754,12 @@ def send_now(call: CallbackQuery):
     note = state.get("note", "")
     title = state.get("title")
     file_content = state.get("file_content")
+    media_data = state.get("media_data")
+    mime_type = state.get("mime_type")
+    
     target = state.get("target_chat_id", user_id)
     delay = int(state.get("delay_seconds", 5))
+    difficulty = state.get("difficulty", "Medium")
 
     user = users_repo.get(user_id) or {}
     num_questions = int(user.get("questions_per_note", 5))
@@ -434,29 +775,48 @@ def send_now(call: CallbackQuery):
 
     update_last_note_time(db, user_id)
     bot.answer_callback_query(call.id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
 
-    generating = bot.send_message(user_id, "Generating...")
+    generating = bot.send_message(user_id, f"Generating {num_questions} questions ({difficulty})...")
     try:
         allow_beyond = bool(state.get("allow_beyond"))
+        questions = []
+        
         if file_content:
             # Chunking to avoid limits; distribute questions across chunks up to requested number
             chunks = chunk_text(file_content, max_chars=3500)
             per_chunk = max(1, num_questions // max(1, len(chunks)))
-            questions = []
             for idx, ch in enumerate(chunks):
                 if len(questions) >= num_questions:
                     break
-                qbatch = generate_questions(ch, per_chunk, user_id=user_id, title_only=False, allow_beyond=True)
+                qbatch = generate_questions(ch, per_chunk, user_id=user_id, title_only=False, allow_beyond=True, difficulty=difficulty)
                 questions.extend(qbatch)
             questions = questions[:num_questions]
         elif title:
             warn = "⚠️ Title-only mode: AI may include info beyond your intended scope."
             bot.send_message(user_id, warn)
-            questions = generate_questions("", num_questions, user_id=user_id, title_only=True, allow_beyond=True, topic_title=title)
+            questions = generate_questions("", num_questions, user_id=user_id, title_only=True, allow_beyond=True, topic_title=title, difficulty=difficulty)
+        elif media_data:
+            # Multimodal (Audio/Image)
+            questions = generate_questions(
+                "", 
+                num_questions, 
+                user_id=user_id, 
+                title_only=False, 
+                allow_beyond=True, 
+                difficulty=difficulty,
+                media_data=media_data,
+                mime_type=mime_type
+            )
         else:
-            questions = generate_questions(note, num_questions, user_id=user_id, title_only=False, allow_beyond=allow_beyond)
+            questions = generate_questions(note, num_questions, user_id=user_id, title_only=False, allow_beyond=allow_beyond, difficulty=difficulty)
+        
         if not questions:
-            bot.send_message(user_id, "An error occurred while generating questions. Please try again.")
+            bot.send_message(user_id, "An error occurred while generating questions (or none returned). Please try again.")
+            bot.delete_message(user_id, generating.id)
             return
         bot.delete_message(user_id, generating.id)
         letters = ["A", "B", "C", "D"]
@@ -483,6 +843,20 @@ def send_now(call: CallbackQuery):
                 )
         increment_quota(db, user_id)
         increase_total_notes(db, user_id)
+        
+        # Save Quiz
+        quiz_title = title or (note[:30] + "..." if note else "Quiz") or "Generated Quiz"
+        if media_data:
+             quiz_title = f"{state.get('title', 'Media Quiz')}"
+
+        if quizzes_repo:
+            quizzes_repo.create({
+                "user_id": user_id,
+                "title": quiz_title,
+                "questions": questions,
+                "created_at": datetime.utcnow()
+            })
+
         # Send summary
         destinations = state.get("target_label", "PM")
         try:
@@ -551,6 +925,7 @@ def handle_schedule_time(message: Message):
             "num_questions": num_questions,
             "question_type": q_format,
             "delay_seconds": int(state.get("delay_seconds", 5)),
+            "difficulty": state.get("difficulty", "Medium"),
             "scheduled_at": scheduled_utc,
             "status": "pending",
             "created_at": datetime.utcnow(),
@@ -620,7 +995,9 @@ def set_question_type(call: CallbackQuery):
 @bot.callback_query_handler(func=lambda call: call.data == "change_qpernote")
 def change_questions_per_note(call: CallbackQuery):
     markup = InlineKeyboardMarkup(row_width=5)
-    buttons = [InlineKeyboardButton(str(i), callback_data=f"set_qpernote_{i}") for i in range(1, 11)]
+    # Common options
+    options = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100]
+    buttons = [InlineKeyboardButton(str(i), callback_data=f"set_qpernote_{i}") for i in options]
     for i in range(0, len(buttons), 5):
         markup.row(*buttons[i : i + 5])
     markup.add(InlineKeyboardButton("Back", callback_data="settings"))
@@ -677,7 +1054,18 @@ def remove_gemini_key(call: CallbackQuery):
 def set_questions_per_note(call: CallbackQuery):
     user_id = call.from_user.id
     new_value = int(call.data.split("_")[-1])
-    max_limit = 10
+    
+    user = users_repo.get(user_id) or {}
+    personal_key = user.get("gemini_api_key")
+    
+    # Determine max limit
+    if personal_key and str(personal_key).strip():
+         max_limit = cfg.max_questions_custom_key or 300
+    elif is_premium(user):
+         max_limit = cfg.max_questions_premium or 150
+    else:
+         max_limit = cfg.max_questions_regular or 100
+
     if new_value > max_limit:
         bot.answer_callback_query(call.id, f"Limit is {max_limit} for your plan.")
         return
@@ -1063,8 +1451,10 @@ def admin_add_admin(message: Message):
     if not users_repo:
         bot.reply_to(message, "DB unavailable.")
         return
-    req = users_repo.get(message.from_user.id)
-    if not req or req.get("role") != "admin":
+    user_id = message.from_user.id
+    req = users_repo.get(user_id)
+    is_owner = (user_id == cfg.owner_id)
+    if not is_owner and (not req or req.get("role") != "admin"):
         bot.reply_to(message, "Not authorized.")
         return
     parts = message.text.strip().split()
@@ -1072,8 +1462,29 @@ def admin_add_admin(message: Message):
         bot.reply_to(message, "Usage: /addadmin <user_id>")
         return
     target_id = int(parts[1])
-    users_repo.set_role(target_id, "admin")
+    users_repo.set_admin(target_id)
     bot.reply_to(message, f"User {target_id} promoted to admin.")
+
+
+@bot.message_handler(commands=["addpremium"])
+def admin_add_premium(message: Message):
+    if not users_repo:
+        bot.reply_to(message, "DB unavailable.")
+        return
+    user_id = message.from_user.id
+    req = users_repo.get(user_id)
+    is_owner = (user_id == cfg.owner_id)
+    if not is_owner and (not req or req.get("role") != "admin"):
+        bot.reply_to(message, "Not authorized.")
+        return
+    parts = message.text.strip().split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        bot.reply_to(message, "Usage: /addpremium <user_id> [days]")
+        return
+    target_id = int(parts[1])
+    days = int(parts[2]) if len(parts) > 2 else 30
+    users_repo.set_premium(target_id, days)
+    bot.reply_to(message, f"User {target_id} is now Premium for {days} days.")
 
 
 @bot.message_handler(commands=["removeadmin"]) 

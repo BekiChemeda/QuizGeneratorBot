@@ -20,7 +20,21 @@ def _choose_api_key(user_id: Optional[int]) -> Optional[str]:
         api_key = cfg.gemini_api_key or None
     return api_key
 
-def generate_questions(note: str, num_questions: int = 5, *, user_id: Optional[int] = None, title_only: bool = False, allow_beyond: bool = False, topic_title: Optional[str] = None) -> List[Dict]:
+import base64
+
+def generate_questions(
+    note: str,
+    num_questions: int = 5,
+    *,
+    user_id: Optional[int] = None,
+    title_only: bool = False,
+    allow_beyond: bool = False,
+    topic_title: Optional[str] = None,
+    difficulty: str = "Medium",
+    media_data: Optional[bytes] = None,
+    mime_type: Optional[str] = None,
+    question_type: str = "multiple_choice"
+) -> List[Dict]:
     api_key = _choose_api_key(user_id)
     if not api_key:
         return []
@@ -31,9 +45,16 @@ def generate_questions(note: str, num_questions: int = 5, *, user_id: Optional[i
     safe_note = (note or "").replace('"', '\\"')
     safe_title = (topic_title or "").replace('"', '\\"')
     scope_hint = "You may use knowledge beyond the note if needed." if allow_beyond else "Use only the provided content; avoid unrelated facts."
-    source_block = f"Title: {safe_title}\nNote:\n```{safe_note}```" if title_only and safe_title else f"Note:\n```{safe_note}```"
+    
+    source_block = ""
+    if title_only and safe_title:
+        source_block = f"Title: {safe_title}\nNote:\n```{safe_note}```"
+    elif safe_note:
+        source_block = f"Note:\n```{safe_note}```"
+
     prompt = f"""
-Generate {num_questions} multiple choice questions from the provided study material.
+Generate {num_questions} {question_type} questions from the provided study material.
+Difficulty Level: {difficulty}
 {scope_hint}
 
 Respond in valid JSON array format. Each object must follow this format:
@@ -52,7 +73,19 @@ Source:
 {source_block}
 """.strip()
 
-    data = {"contents": [{"parts": [{"text": prompt}]}]}
+    contents_parts = [{"text": prompt}]
+    
+    if media_data and mime_type:
+        # Encode bytes to base64 string
+        b64_data = base64.b64encode(media_data).decode("utf-8")
+        contents_parts.append({
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": b64_data
+            }
+        })
+
+    data = {"contents": [{"parts": contents_parts}]}
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(data), timeout=60)
