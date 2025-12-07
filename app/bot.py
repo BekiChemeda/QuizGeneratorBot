@@ -1408,8 +1408,12 @@ def admin_dashboard(message: Message):
     if not users_repo:
         bot.reply_to(message, "DB unavailable.")
         return
-    admin = users_repo.get(message.from_user.id)
-    if not admin or admin.get("role") != "admin":
+    
+    user_id = message.from_user.id
+    admin = users_repo.get(user_id)
+    is_owner = (user_id == cfg.owner_id)
+    
+    if not is_owner and (not admin or admin.get("role") != "admin"):
         bot.reply_to(message, "Not authorized.")
         return
     
@@ -1428,7 +1432,8 @@ def admin_dashboard(message: Message):
 def handle_admin_callbacks(call: CallbackQuery):
     user_id = call.from_user.id
     admin = users_repo.get(user_id)
-    if not admin or admin.get("role") != "admin":
+    is_owner = (user_id == cfg.owner_id)
+    if not is_owner and (not admin or admin.get("role") != "admin"):
         bot.answer_callback_query(call.id, "Not authorized.")
         return
 
