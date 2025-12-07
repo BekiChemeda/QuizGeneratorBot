@@ -465,6 +465,7 @@ def handle_generate(call: CallbackQuery):
     pending_notes[user_id] = {"stage": "await_input_type"}
     bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
         InlineKeyboardButton("📝 Use a Note", callback_data="input_note"),
         InlineKeyboardButton("🏷️ Title Only", callback_data="input_title"),
         InlineKeyboardButton("📄 File (PDF/DOCX/TXT/PPT) [Premium]", callback_data="input_file"),
