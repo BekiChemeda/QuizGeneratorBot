@@ -284,6 +284,19 @@ def handle_add_admin(message: Message):
         bot.reply_to(message, f"Error: {e}")
 
 
+def admin_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📊 Settings Overview", callback_data="admin_settings_overview"),
+        InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
+        InlineKeyboardButton("🔐 Force Subscription", callback_data="admin_manage_sub"),
+        InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
+        InlineKeyboardButton("👥 Manage Users", callback_data="admin_users"),
+        InlineKeyboardButton("🔙 Close", callback_data="close_admin"),
+    )
+    return kb
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "admin_menu")
 def handle_admin_menu_btn(call: CallbackQuery):
     user_id = call.from_user.id
@@ -295,15 +308,7 @@ def handle_admin_menu_btn(call: CallbackQuery):
         return
     
     # Admin Dashboard Menu
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("📊 Settings Overview", callback_data="admin_settings_overview"),
-        InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
-        InlineKeyboardButton("🔐 Force Subscription", callback_data="admin_manage_sub"),
-        InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
-        InlineKeyboardButton("👥 Manage Users", callback_data="admin_users"),
-        InlineKeyboardButton("🔙 Close", callback_data="close_admin"),
-    )
+    kb = admin_keyboard()
     
     try:
         bot.edit_message_text("🔧 **Admin Dashboard**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
@@ -1951,7 +1956,7 @@ def admin_dashboard(message: Message):
     bot.reply_to(message, "🔧 **Admin Dashboard**", parse_mode="Markdown", reply_markup=kb)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_") or call.data == "close_admin")
 def handle_admin_callbacks(call: CallbackQuery):
     user_id = call.from_user.id
     admin = users_repo.get(user_id)
@@ -1960,19 +1965,55 @@ def handle_admin_callbacks(call: CallbackQuery):
         bot.answer_callback_query(call.id, "Not authorized.")
         return
 
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
+    # Skip delete if it's admin_menu (which edits) or some others? 
+    # Actually, the original code deletes it.
+    if call.data != "admin_menu":
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
 
     if call.data == "admin_broadcast":
         msg = bot.send_message(user_id, "Send the message you want to broadcast (Text, Photo, or Forward).")
         bot.register_next_step_handler(msg, process_broadcast)
     elif call.data == "admin_set_price":
-        # Placeholder
-        bot.answer_callback_query(call.id, "Feature coming soon.")
+        msg = bot.send_message(user_id, "Send the new premium price in ETB (digits only).")
+        bot.register_next_step_handler(msg, process_set_price)
     elif call.data == "admin_users":
-        bot.answer_callback_query(call.id, "Use /addadmin or /addpremium commands.")
+        total_users = users_repo.collection.count_documents({})
+        premium_users = users_repo.collection.count_documents({"type": "premium"})
+        admins = users_repo.collection.count_documents({"role": "admin"})
+        total_quizzes = quizzes_repo.collection.count_documents({})
+        
+        text = (
+            "👥 **User Management Stats**\n\n"
+            f"• Total Users: {total_users}\n"
+            f"• Premium Users: {premium_users}\n"
+            f"• Admins: {admins}\n"
+            f"• Total Quizzes: {total_quizzes}\n\n"
+            "Use `/addadmin <id>` or `/addpremium <id>` to manage."
+        )
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
+        bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
+    elif call.data == "close_admin":
+        # Already deleted above if call.data != "admin_menu"
+        bot.answer_callback_query(call.id, "Closed.")
+
+def process_set_price(message: Message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    if not text.isdigit():
+        bot.reply_to(message, "Invalid price. Please send digits only.")
+        return
+    
+    price = int(text)
+    sr = SettingsRepository(db)
+    sr.set("premium_price", price)
+    
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
+    bot.reply_to(message, f"✅ Premium price updated to {price} ETB.", reply_markup=kb)
 
 
 def process_broadcast(message: Message):
@@ -1994,7 +2035,10 @@ def execute_broadcast(call: CallbackQuery):
     user_id = call.from_user.id
     if call.data == "cancel_broadcast":
         pending_notes.pop(user_id, None)
-        bot.edit_message_text("Broadcast cancelled.", user_id, call.message.message_id)
+        try:
+            bot.edit_message_text("Broadcast cancelled.", call.message.chat.id, call.message.message_id)
+        except:
+            bot.send_message(user_id, "Broadcast cancelled.")
         return
         
     state = pending_notes.get(user_id, {})
@@ -2003,7 +2047,10 @@ def execute_broadcast(call: CallbackQuery):
         bot.answer_callback_query(call.id, "Session expired.")
         return
 
-    bot.edit_message_text("Broadcasting started in background. You will be notified when complete.", user_id, call.message.message_id)
+    try:
+        bot.edit_message_text("Broadcasting started in background. You will be notified when complete.", call.message.chat.id, call.message.message_id)
+    except:
+        bot.send_message(user_id, "Broadcasting started in background.")
     
     import threading
     def run_broadcast(msg, requester_id):
@@ -2013,6 +2060,7 @@ def execute_broadcast(call: CallbackQuery):
         
         for i, u in enumerate(all_users):
             target_id = u.get("id")
+            if not target_id: continue
             try:
                 if msg.content_type == "text":
                     bot.send_message(target_id, msg.text)
@@ -2026,9 +2074,17 @@ def execute_broadcast(call: CallbackQuery):
                     bot.send_audio(target_id, msg.audio.file_id, caption=msg.caption)
                 elif msg.content_type == "voice":
                     bot.send_voice(target_id, msg.voice.file_id, caption=msg.caption)
+                elif msg.content_type == "video_note":
+                    bot.send_video_note(target_id, msg.video_note.file_id)
+                elif msg.content_type == "animation":
+                    bot.send_animation(target_id, msg.animation.file_id, caption=msg.caption)
+                elif msg.content_type == "sticker":
+                    bot.send_sticker(target_id, msg.sticker.file_id)
+                else:
+                    bot.copy_message(target_id, msg.chat.id, msg.message_id)
                 success_count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to send broadcast to {target_id}: {e}")
             
             # Rate limiting: 20 messages per second (Telegram's limit)
             if (i + 1) % 20 == 0:
