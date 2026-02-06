@@ -34,7 +34,6 @@ from .services.quota import (
     is_premium
 )
 from .services.scheduler import QuizScheduler
-from .services.scheduler import QuizScheduler
 from .utils import is_subscribed, home_keyboard, format_dt_utc3, from_utc3_to_utc, notify_admins
 from .logger import logger
 import traceback
@@ -331,7 +330,7 @@ def handle_admin_manage_sub(call: CallbackQuery):
     force = sr.get("force_subscription", cfg.force_subscription)
     channels = sr.get("force_channels", cfg.force_channels)
     
-    status_icon = "mV" if force else "❌"
+    status_icon = "✅" if force else "❌"
     toggle_btn_text = "Disable Force Sub" if force else "Enable Force Sub"
     
     text = (
@@ -1837,9 +1836,6 @@ def handle_delete_schedule(call: CallbackQuery):
     handle_schedule_menu(call)
 
 
-print("Bot running...")
-if __name__ == "__main__":
-    bot.infinity_polling()
 
 
 @bot.message_handler(commands=["setforcesub"]) 
@@ -1939,17 +1935,17 @@ def admin_dashboard(message: Message):
     if not users_repo:
         bot.reply_to(message, "DB unavailable.")
         return
-    
+
     user_id = message.from_user.id
     admin = users_repo.get(user_id)
     is_owner = (user_id == cfg.owner_id)
-    
+
     if not is_owner and (not admin or admin.get("role") != "admin"):
         bot.reply_to(message, "Not authorized.")
         return
-    
+
     kb = admin_keyboard()
-    bot.reply_to(message, "🔧 **Admin Dashboard**", parse_mode="Markdown", reply_markup=kb)
+    bot.send_message(user_id, "🔧 **Admin Dashboard**", parse_mode="Markdown", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_") or call.data == "close_admin")
 @error_handler
@@ -1961,80 +1957,62 @@ def handle_admin_callbacks(call: CallbackQuery):
         bot.answer_callback_query(call.id, "Not authorized.")
         return
 
-    # Always answer to stop the loading state
     bot.answer_callback_query(call.id)
 
-    # Skip delete if it's admin_menu (which edits) or some others? 
-    # Actually, the original code deletes it.
-    if call.data not in ["admin_menu", "admin_manage_sub", "admin_settings_overview"]:
+    if call.data == "admin_broadcast":
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
-        except Exception:
+        except:
             pass
-
-    if call.data == "admin_broadcast":
-        msg = bot.send_message(user_id, "Send the message you want to broadcast (Text, Photo, or Forward).")
+        msg = bot.send_message(user_id, "📢 **Broadcast Message**\n\nSend your message.")
         bot.register_next_step_handler(msg, process_broadcast)
+    
     elif call.data == "admin_set_price":
-        msg = bot.send_message(user_id, "Send the new premium price in ETB (digits only).")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except:
+            pass
+        msg = bot.send_message(user_id, "💰 **Set Price**\n\nSend digits.")
         bot.register_next_step_handler(msg, process_set_price)
+    
     elif call.data == "admin_users":
         total_users = users_repo.collection.count_documents({})
-        premium_users = users_repo.collection.count_documents({"type": "premium"})
-        admins = users_repo.collection.count_documents({"role": "admin"})
-        total_quizzes = quizzes_repo.collection.count_documents({})
-        
-        text = (
-            "👥 **User Management Stats**\n\n"
-            f"• Total Users: {total_users}\n"
-            f"• Premium Users: {premium_users}\n"
-            f"• Admins: {admins}\n"
-            f"• Total Quizzes: {total_quizzes}\n\n"
-            "Use `/addadmin <id>` or `/addpremium <id>` to manage."
-        )
+        text = f"Total Users: {total_users}"
         kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
-        bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
+        kb.add(InlineKeyboardButton("🔙 Back", callback_data="admin_menu"))
+        try:
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+        except:
+            bot.send_message(user_id, text, reply_markup=kb)
+            
     elif call.data == "close_admin":
-        bot.answer_callback_query(call.id, "Closed.")
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+            
     elif call.data == "admin_settings_overview":
-        # Call the existing handler
         handle_admin_settings_overview(call)
+        
     elif call.data == "admin_manage_sub":
-        # Call the existing handler
         handle_admin_manage_sub(call)
+        
+    elif call.data == "admin_menu":
+        handle_admin_menu_btn(call)
 
 def process_set_price(message: Message):
     user_id = message.from_user.id
-    text = message.text.strip()
-    if not text.isdigit():
-        bot.reply_to(message, "Invalid price. Please send digits only.")
+    if not message.text or not message.text.isdigit():
+        bot.reply_to(message, "Error.")
         return
-    
-    price = int(text)
-    sr = SettingsRepository(db)
-    sr.set("premium_price", price)
-    
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
-    bot.reply_to(message, f"✅ Premium price updated to {price} ETB.", reply_markup=kb)
-
+    SettingsRepository(db).set("premium_price", int(message.text))
+    bot.reply_to(message, "Done.")
 
 def process_broadcast(message: Message):
     user_id = message.from_user.id
-    # Confirm broadcast
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("✅ Yes, Send", callback_data="confirm_broadcast"),
-        InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")
-    )
-    
-    # Store message to broadcast in state (simplified)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Send", callback_data="confirm_broadcast"), InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast"))
     pending_notes[user_id] = {"broadcast_msg": message} 
-    bot.reply_to(message, "Are you sure you want to broadcast this message to ALL users?", reply_markup=kb)
+    bot.reply_to(message, "Confirm broadcast?", reply_markup=kb)
 
-
-@bot.callback_query_handler(func=lambda call: call.data in ["confirm_broadcast", "cancel_broadcast"])
 def execute_broadcast(call: CallbackQuery):
     user_id = call.from_user.id
     if call.data == "cancel_broadcast":
@@ -2101,6 +2079,11 @@ def execute_broadcast(call: CallbackQuery):
 
     threading.Thread(target=run_broadcast, args=(broadcast_msg, user_id), daemon=True).start()
     pending_notes.pop(user_id, None)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["confirm_broadcast", "cancel_broadcast"])
+@error_handler
+def handle_broadcast_confirmation(call: CallbackQuery):
+    execute_broadcast(call)
 
 
 @bot.message_handler(commands=["setmaxnotes"]) 
@@ -2216,3 +2199,6 @@ def admin_remove_admin(message: Message):
     target_id = int(parts[1])
     users_repo.set_role(target_id, "user")
     bot.reply_to(message, f"User {target_id} demoted from admin.")
+print("Bot running...")
+if __name__ == "__main__":
+    bot.infinity_polling()
