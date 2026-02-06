@@ -309,13 +309,14 @@ def handle_admin_menu_btn(call: CallbackQuery):
     
     # Admin Dashboard Menu
     kb = admin_keyboard()
+    bot.answer_callback_query(call.id)
     
     try:
         bot.edit_message_text("🔧 **Admin Dashboard**", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
     except Exception:
         bot.send_message(user_id, "🔧 **Admin Dashboard**", parse_mode="Markdown", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda call: call.data == "admin_manage_sub")
+# Manager handler (called by others as well)
 def handle_admin_manage_sub(call: CallbackQuery):
     user_id = call.from_user.id
     # Auth Check
@@ -355,6 +356,7 @@ def handle_admin_manage_sub(call: CallbackQuery):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_toggle_force")
 def toggle_force_sub(call: CallbackQuery):
+    bot.answer_callback_query(call.id)
     user_id = call.from_user.id
     # Auth Check
     admin = users_repo.get(user_id)
@@ -370,6 +372,7 @@ def toggle_force_sub(call: CallbackQuery):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_rm_sub_"))
 def remove_force_channel(call: CallbackQuery):
+    bot.answer_callback_query(call.id)
     channel = call.data.replace("admin_rm_sub_", "")
     sr = SettingsRepository(db)
     channels = sr.get("force_channels", cfg.force_channels)
@@ -380,6 +383,7 @@ def remove_force_channel(call: CallbackQuery):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_sub_prompt")
 def prompt_add_force_channel(call: CallbackQuery):
+    bot.answer_callback_query(call.id)
     user_id = call.from_user.id
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -424,7 +428,7 @@ def handle_add_force_channel_msg(message: Message):
     bot.send_message(user_id, "Channel added.", reply_markup=kb)
 
 
-@bot.callback_query_handler(func=lambda call: call.data == "admin_settings_overview")
+# Overview handler
 def handle_admin_settings_overview(call: CallbackQuery):
     user_id = call.from_user.id
     # Auth Check
@@ -1944,19 +1948,11 @@ def admin_dashboard(message: Message):
         bot.reply_to(message, "Not authorized.")
         return
     
-    # Admin Dashboard Menu
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
-        InlineKeyboardButton("� Force Subscription", callback_data="admin_manage_sub"),
-        InlineKeyboardButton("�💰 Set Premium Price", callback_data="admin_set_price"),
-        InlineKeyboardButton("👥 Manage Users", callback_data="admin_users"),
-        InlineKeyboardButton("🔙 Close", callback_data="close_admin"),
-    )
+    kb = admin_keyboard()
     bot.reply_to(message, "🔧 **Admin Dashboard**", parse_mode="Markdown", reply_markup=kb)
 
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_") or call.data == "close_admin")
+@error_handler
 def handle_admin_callbacks(call: CallbackQuery):
     user_id = call.from_user.id
     admin = users_repo.get(user_id)
@@ -1965,9 +1961,12 @@ def handle_admin_callbacks(call: CallbackQuery):
         bot.answer_callback_query(call.id, "Not authorized.")
         return
 
+    # Always answer to stop the loading state
+    bot.answer_callback_query(call.id)
+
     # Skip delete if it's admin_menu (which edits) or some others? 
     # Actually, the original code deletes it.
-    if call.data != "admin_menu":
+    if call.data not in ["admin_menu", "admin_manage_sub", "admin_settings_overview"]:
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
@@ -1997,8 +1996,13 @@ def handle_admin_callbacks(call: CallbackQuery):
         kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
         bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=kb)
     elif call.data == "close_admin":
-        # Already deleted above if call.data != "admin_menu"
         bot.answer_callback_query(call.id, "Closed.")
+    elif call.data == "admin_settings_overview":
+        # Call the existing handler
+        handle_admin_settings_overview(call)
+    elif call.data == "admin_manage_sub":
+        # Call the existing handler
+        handle_admin_manage_sub(call)
 
 def process_set_price(message: Message):
     user_id = message.from_user.id
