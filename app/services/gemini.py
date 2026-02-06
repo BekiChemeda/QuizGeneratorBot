@@ -106,16 +106,22 @@ Source:
         if not response.text:
             return []
 
-        cleaned = response.text.strip()
-        # Remove markdown code blocks if present
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]
-        if cleaned.startswith("```"):
-            cleaned = cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
+        text = response.text.strip()
         
-        parsed = json.loads(cleaned.strip())
+        # Robust JSON extraction
+        try:
+            start_idx = text.find('[')
+            end_idx = text.rfind(']')
+            if start_idx != -1 and end_idx != -1:
+                cleaned = text[start_idx:end_idx+1]
+                parsed = json.loads(cleaned)
+            else:
+                # Fallback to simple strip/replace
+                cleaned = text.replace("```json", "").replace("```", "").strip()
+                parsed = json.loads(cleaned)
+        except (ValueError, json.JSONDecodeError):
+            print(f"Failed to parse Gemini response: {text[:200]}")
+            return []
         
         validated = [
             q

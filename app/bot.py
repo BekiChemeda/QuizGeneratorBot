@@ -121,7 +121,9 @@ def main_menu(user_id: int) -> InlineKeyboardMarkup:
 @error_handler
 def handle_start(message: Message):
     user_id = message.chat.id
-    username = message.from_user.username or "No"
+    # Use full name or username for display
+    username = message.from_user.username
+    display_name = message.from_user.first_name or username or "Someone"
     
     # Check for referral args
     parts = message.text.split()
@@ -139,7 +141,7 @@ def handle_start(message: Message):
         if users_repo.set_referrer(user_id, referrer_id):
             # Notify referrer
             try:
-                bot.send_message(referrer_id, f"🎉 New user {username} joined via your link!")
+                bot.send_message(referrer_id, f"🎉 New user {display_name} joined via your link!")
                 # Check for milestone rewards
                 users_repo.check_and_reward_referral_milestone(referrer_id, bot, settings_repo)
             except Exception:
@@ -374,8 +376,12 @@ def remove_force_channel(call: CallbackQuery):
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_sub_prompt")
 def prompt_add_force_channel(call: CallbackQuery):
     user_id = call.from_user.id
-    pending_notes[user_id] = {"stage": "await_admin_force_channel"}
-    bot.send_message(user_id, "Send the channel @username (bot must be admin there).")
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    msg = bot.send_message(user_id, "Send the channel @username (bot must be admin there).")
+    pending_notes[user_id] = {"stage": "await_admin_force_channel", "last_msg_id": msg.message_id}
     bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_admin_force_channel")
@@ -386,6 +392,18 @@ def handle_add_force_channel_msg(message: Message):
         bot.reply_to(message, "Invalid format. Use @channelname.")
         return
         
+    # Delete prompt and user message
+    state = pending_notes.get(user_id)
+    if state and "last_msg_id" in state:
+        try:
+            bot.delete_message(user_id, state["last_msg_id"])
+        except:
+            pass
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+
     sr = SettingsRepository(db)
     channels = sr.get("force_channels", cfg.force_channels)
     if channel not in channels:
@@ -495,6 +513,10 @@ def handle_add_premium(message: Message):
 @bot.callback_query_handler(func=lambda call: call.data == "upgrade_premium")
 def handle_upgrade_premium(call: CallbackQuery):
     user_id = call.from_user.id
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
     title = "Premium Subscription (30 Days)"
     description = "Unlock all features: Unlimited quizzes (fair use), YouTube/Audio support, Exports, higher limits."
     payload = f"premium_30_{user_id}"
@@ -626,7 +648,15 @@ def handle_add_channel_info(call: CallbackQuery):
         "2) Forward a message from that channel here OR send the channel @username."
     )
     bot.answer_callback_query(call.id)
-    bot.send_message(user_id, text, reply_markup=home_keyboard())
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    msg = bot.send_message(user_id, text, reply_markup=home_keyboard())
+    # We might need to store this last_msg_id in a separate state if we want to delete it later
+    # but channel addition doesn't use pending_notes state yet.
+    # Let's add it.
+    pending_notes[user_id] = {"stage": "await_channel", "last_msg_id": msg.message_id}
 
 
 @bot.message_handler(func=lambda m: m.forward_from_chat is not None and m.forward_from_chat.type == "channel")
@@ -636,6 +666,21 @@ def handle_channel_forward(message: Message):
     title = chat.title or "Channel"
     username = chat.username
     user_id = message.from_user.id
+    
+    # Try delete previous prompt and user msg
+    state = pending_notes.get(user_id)
+    if state and state.get("stage") == "await_channel":
+        if "last_msg_id" in state:
+            try:
+                bot.delete_message(user_id, state["last_msg_id"])
+            except:
+                pass
+        pending_notes.pop(user_id, None)
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+
     try:
         member = bot.get_chat_member(chat_id, user_id)
         if member.status not in ["administrator", "creator"]:
@@ -653,6 +698,21 @@ def handle_channel_forward(message: Message):
 def handle_channel_username(message: Message):
     # Attempt to resolve channel by username
     user_id = message.from_user.id
+
+    # Try delete previous prompt and user msg
+    state = pending_notes.get(user_id)
+    if state and state.get("stage") == "await_channel":
+        if "last_msg_id" in state:
+            try:
+                bot.delete_message(user_id, state["last_msg_id"])
+            except:
+                pass
+        pending_notes.pop(user_id, None)
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
+
     try:
         chat = bot.get_chat(message.text)
         if not chat or chat.type != "channel":
@@ -738,6 +798,42 @@ def handle_view_quiz(call: CallbackQuery):
         bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("exp_more_"))
+def handle_explain_more(call: CallbackQuery):
+    user_id = call.from_user.id
+    q_index = int(call.data.split("_")[-1])
+    
+    # Attempt to retrieve the last quiz generated for this user
+    last_quiz = quizzes_repo.collection.find_one({"user_id": user_id}, sort=[("created_at", -1)])
+    if not last_quiz or "questions" not in last_quiz:
+        bot.answer_callback_query(call.id, "Context lost. Please start a new quiz.")
+        return
+        
+    try:
+        q_data = last_quiz["questions"][q_index - 1]
+    except (IndexError, KeyError):
+        bot.answer_callback_query(call.id, "Question not found.")
+        return
+
+    bot.answer_callback_query(call.id, "🤖 Thinking...")
+    
+    # Use Gemini to explain this specific question in detail
+    prompt = f"Explain this quiz question in more detail. Why is the correct answer right and why might someone get it wrong?\n\nQuestion: {q_data['question']}\nCorrect Answer: {q_data['choices'][q_data['answer_index']]}\nExplanation: {q_data.get('explanation','')}"
+    
+    try:
+        # Re-using the generate logic but for a simple chat/explanation
+        api_key = _choose_api_key(user_id)
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        explanation = response.text or "Could not generate explanation."
+        bot.send_message(user_id, f"<b>🤖 AI Deep Dive (Q{q_index}):</b>\n\n{explanation}", parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(user_id, f"Failed to get deep dive: {e}")
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("exp_"))
 def handle_export_quiz(call: CallbackQuery):
     user_id = call.from_user.id
@@ -815,6 +911,10 @@ def handle_generate(call: CallbackQuery):
     user = users_repo.get(user_id) or {}
     if not user.get("gemini_api_key"):
         tip = "\n\nTip: Add your own Gemini API key to lift the 2/day limit. Use Settings → Set/Change Gemini API Key."
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
     bot.send_message(user_id, "Choose input type:" + tip, reply_markup=kb)
 
 
@@ -826,29 +926,39 @@ def handle_input_choice(call: CallbackQuery):
         return
     
     choice = call.data
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
     if choice == "input_note":
         pending_notes[user_id]["stage"] = "await_note"
-        bot.send_message(user_id, "Please send your note now.")
+        msg = bot.send_message(user_id, "Please send your note now.")
+        pending_notes[user_id]["last_msg_id"] = msg.message_id
     elif choice == "input_title":
         pending_notes[user_id]["stage"] = "await_title"
-        bot.send_message(user_id, "Please send the topic/title.")
+        msg = bot.send_message(user_id, "Please send the topic/title.")
+        pending_notes[user_id]["last_msg_id"] = msg.message_id
     elif choice == "input_file":
         pending_notes[user_id]["stage"] = "await_file"
-        bot.send_message(user_id, "Please upload your file (PDF, DOCX, TXT, PPT).")
+        msg = bot.send_message(user_id, "Please upload your file (PDF, DOCX, TXT, PPT).")
+        pending_notes[user_id]["last_msg_id"] = msg.message_id
     elif choice == "input_youtube":
         user = users_repo.get(user_id) or {}
         if not is_premium(user) and user.get("role") != "admin" and user_id != cfg.owner_id:
              bot.answer_callback_query(call.id, "Premium feature only!", show_alert=True)
              return
         pending_notes[user_id]["stage"] = "await_youtube"
-        bot.send_message(user_id, "Please send a YouTube video link.")
+        msg = bot.send_message(user_id, "Please send a YouTube video link.")
+        pending_notes[user_id]["last_msg_id"] = msg.message_id
     elif choice == "input_audio":
         user = users_repo.get(user_id) or {}
         if not is_premium(user) and user.get("role") != "admin" and user_id != cfg.owner_id:
              bot.answer_callback_query(call.id, "Premium feature only!", show_alert=True)
              return
         pending_notes[user_id]["stage"] = "await_audio"
-        bot.send_message(user_id, "Please send an audio file (Voice Note or MP3/OGG/WAV). English Only.")
+        msg = bot.send_message(user_id, "Please send an audio file (Voice Note or MP3/OGG/WAV). English Only.")
+        pending_notes[user_id]["last_msg_id"] = msg.message_id
     
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -857,6 +967,14 @@ def handle_input_choice(call: CallbackQuery):
 
 
 def ask_difficulty(user_id: int):
+    # Try delete previous prompt
+    state = pending_notes.get(user_id)
+    if state and "last_msg_id" in state:
+        try:
+            bot.delete_message(user_id, state["last_msg_id"])
+        except:
+            pass
+
     # Ask Difficulty
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -874,6 +992,10 @@ def handle_title_submission(message: Message):
     user_id = message.from_user.id
     title = message.text or ""
     pending_notes[user_id]["title"] = title
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
     ask_difficulty(user_id)
 
 
@@ -889,7 +1011,13 @@ def handle_file_submission(message: Message):
 
         pending_notes[user_id]["file_content"] = text
         pending_notes[user_id]["file_name"] = filename
-        bot.reply_to(message, f"File parsed: {filename}")
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except:
+            pass
+        # Note: we don't reply_to here because we want it to "disappear", or we can keep the reply and ask_difficulty will delete the prompt.
+        # But ask_difficulty deletes the PROMPT (last_msg_id).
+        # Better to just delete the user's file message too.
         ask_difficulty(user_id)
     except ValueError as e:
         bot.reply_to(message, f"File Error: {e}")
@@ -902,6 +1030,10 @@ def handle_note_submission(message: Message):
     user_id = message.from_user.id
     note = message.text or ""
     pending_notes[user_id]["note"] = note
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
     ask_difficulty(user_id)
 
 
@@ -921,7 +1053,6 @@ def handle_youtube_submission(message: Message):
         
         if text:
             pending_notes[user_id]["note"] = text
-            bot.reply_to(message, "✅ Transcript fetched successfully.")
         elif audio_data:
             pending_notes[user_id]["media_data"] = audio_data
             pending_notes[user_id]["mime_type"] = mime_type
@@ -930,11 +1061,14 @@ def handle_youtube_submission(message: Message):
                 # Truncate description to reasonable length
                 context = video_description[:500] if len(video_description) > 500 else video_description
                 pending_notes[user_id]["note"] = f"Video Description: {context}"
-            bot.reply_to(message, "✅ Audio downloaded successfully (Transcript unavailable).")
         else:
              bot.send_message(user_id, "Could not fetch content. Video might be restricted or too long.")
              return
 
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except:
+            pass
         ask_difficulty(user_id)
     except Exception as e:
         logger.error(f"YouTube Error: {e}")
@@ -971,40 +1105,17 @@ def handle_audio_submission(message: Message):
         pending_notes[user_id]["title"] = "Audio Note"
         
         bot.delete_message(message.chat.id, processing.message_id)
-        bot.reply_to(message, "Audio received!")
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except:
+            pass
         ask_difficulty(user_id)
     except Exception as e:
          logger.error(f"Audio processing error: {e}")
          bot.edit_message_text("Error processing audio. Please try again.", message.chat.id, processing.message_id)
 
 
-@bot.message_handler(content_types=["audio", "voice"], func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_audio")
-@error_handler
-def handle_audio_submission(message: Message):
-    user_id = message.from_user.id
-    
-    file_id = message.voice.file_id if message.voice else message.audio.file_id
-    mime_type = message.voice.mime_type if message.voice else message.audio.mime_type
-    
-    # Downloading is heavy; restrict size? 20MB limit in bot settings/API usually.
-    # Telebot download.
-    processing = bot.reply_to(message, "Downloading audio (this may take a moment)...")
-    try:
-        file_info = bot.get_file(file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        
-        if not downloaded_file:
-             raise ValueError("Download failed")
-             
-        pending_notes[user_id]["media_data"] = downloaded_file
-        pending_notes[user_id]["mime_type"] = mime_type or "audio/ogg" # Voice notes often ogg
-        pending_notes[user_id]["title"] = "Audio Note"
-        
-        bot.delete_message(message.chat.id, processing.message_id)
-        bot.reply_to(message, "Audio received!")
-        ask_difficulty(user_id)
-    except Exception as e:
-         bot.edit_message_text(f"Error processing audio: {str(e)}", message.chat.id, processing.message_id)
+# (Rest of code continues...)
 
 
 
@@ -1081,6 +1192,10 @@ def handle_destination_selection(call: CallbackQuery):
 
     state["stage"] = "choose_delay"
     bot.answer_callback_query(call.id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
     bot.send_message(user_id, "Choose delay between questions:", reply_markup=kb)
 
 
@@ -1095,7 +1210,12 @@ def handle_delay(call: CallbackQuery):
     if call.data == "delay_custom":
         state["stage"] = "await_custom_delay"
         bot.answer_callback_query(call.id)
-        bot.send_message(user_id, "Send a delay in seconds (5-60):")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        msg = bot.send_message(user_id, "Send a delay in seconds (5-60):")
+        state["last_msg_id"] = msg.message_id
         return
 
     delay = int(call.data.split("_")[1])
@@ -1110,6 +1230,10 @@ def handle_delay(call: CallbackQuery):
 
     state["stage"] = "confirm_send_or_schedule"
     bot.answer_callback_query(call.id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
     bot.send_message(user_id, f"Delay set to {delay}s. Send now or schedule?", reply_markup=kb)
 
 
@@ -1127,6 +1251,17 @@ def handle_custom_delay(message: Message):
     except Exception:
         bot.reply_to(message, "Invalid delay. Send a number 5-60.")
         return
+
+    # Delete prompt and user msg
+    if "last_msg_id" in state:
+        try:
+            bot.delete_message(user_id, state["last_msg_id"])
+        except:
+            pass
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
 
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(InlineKeyboardButton("Send Now", callback_data="sendnow"))
@@ -1213,6 +1348,7 @@ def send_now(call: CallbackQuery):
         letters = ["A", "B", "C", "D"]
         for idx, q in enumerate(questions, start=1):
             time.sleep(delay)
+            kb = None
             if q_format == "text":
                 text = f"{idx}. {q['question']}\n"
                 for i, c in enumerate(q["choices"]):
@@ -1222,7 +1358,12 @@ def send_now(call: CallbackQuery):
                 explanation = (q.get("explanation") or "")
                 if explanation:
                     text += f"\n<b>Explanation:</b> {explanation[:195]}"
-                bot.send_message(target, text, parse_mode="HTML")
+                
+                kb = InlineKeyboardMarkup()
+                # Store enough context in callback_data to explain the question
+                # Limitation: callback_data max 64 bytes. We'll use a short ID.
+                kb.add(InlineKeyboardButton("🤖 Explain More", callback_data=f"exp_more_{idx}"))
+                bot.send_message(target, text, parse_mode="HTML", reply_markup=kb)
             else:
                 bot.send_poll(
                     target,
@@ -1232,6 +1373,13 @@ def send_now(call: CallbackQuery):
                     correct_option_id=q["answer_index"],
                     explanation=(q.get("explanation") or "")[:195],
                 )
+        
+        # Save generated questions in state for "Explain More" sessions
+        if q_format == "text":
+             # We need a more persistent way to store these for the callback, 
+             # but for now we'll use a temporary cache or similar logic.
+             # Actually, we already save the quiz to DB.
+             pass
         increment_quota(db, user_id)
         increase_total_notes(db, user_id)
         
@@ -1281,7 +1429,12 @@ def do_schedule(call: CallbackQuery):
     bot.answer_callback_query(call.id)
     # Show local UTC+3 time hint
     now = datetime.now()
-    bot.send_message(user_id, f"Send schedule time in format YYYY-MM-DD HH:MM (UTC+3). Example: 2025-01-01 12:30\nNow (UTC+3): {format_dt_utc3(now)}")
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    msg = bot.send_message(user_id, f"Send schedule time in format YYYY-MM-DD HH:MM (UTC+3). Example: 2025-01-01 12:30\nNow (UTC+3): {format_dt_utc3(now)}")
+    state["last_msg_id"] = msg.message_id
 
 
 @bot.message_handler(func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_schedule_time")
@@ -1295,6 +1448,17 @@ def handle_schedule_time(message: Message):
     except Exception:
         bot.reply_to(message, "Invalid format. Use YYYY-MM-DD HH:MM (UTC+3)")
         return
+
+    # Delete prompt and user msg
+    if "last_msg_id" in state:
+        try:
+            bot.delete_message(user_id, state["last_msg_id"])
+        except:
+            pass
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except:
+        pass
 
     # Save schedule
     user = users_repo.get(user_id) or {}
@@ -1796,6 +1960,11 @@ def handle_admin_callbacks(call: CallbackQuery):
         bot.answer_callback_query(call.id, "Not authorized.")
         return
 
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
     if call.data == "admin_broadcast":
         msg = bot.send_message(user_id, "Send the message you want to broadcast (Text, Photo, or Forward).")
         bot.register_next_step_handler(msg, process_broadcast)
@@ -1834,35 +2003,43 @@ def execute_broadcast(call: CallbackQuery):
         bot.answer_callback_query(call.id, "Session expired.")
         return
 
-    bot.edit_message_text("Broadcasting... This may take a while.", user_id, call.message.message_id)
+    bot.edit_message_text("Broadcasting started in background. You will be notified when complete.", user_id, call.message.message_id)
     
-    # Iterate all users (Naïve approach - heavy for large userbase, but fine for MVP)
-    # Ideally should use chunks or background task
-    all_users = users_repo.collection.find({})
-    count = 0
-    for u in all_users:
-        uid = u.get("id")
-        try:
-            if broadcast_msg.content_type == "text":
-                bot.send_message(uid, broadcast_msg.text)
-            elif broadcast_msg.content_type == "photo":
-                bot.send_photo(uid, broadcast_msg.photo[-1].file_id, caption=broadcast_msg.caption)
-            elif broadcast_msg.content_type == "document":
-                bot.send_document(uid, broadcast_msg.document.file_id, caption=broadcast_msg.caption)
-            elif broadcast_msg.content_type == "video":
-                bot.send_video(uid, broadcast_msg.video.file_id, caption=broadcast_msg.caption)
-            elif broadcast_msg.content_type == "audio":
-                bot.send_audio(uid, broadcast_msg.audio.file_id, caption=broadcast_msg.caption)
-            elif broadcast_msg.content_type == "voice":
-                bot.send_voice(uid, broadcast_msg.voice.file_id, caption=broadcast_msg.caption)
-            # Handle forwards if message was forwarded
-            # Simple copy_message equivalent
-            # bot.copy_message(uid, broadcast_msg.chat.id, broadcast_msg.message_id) 
-            count += 1
-        except Exception:
-            continue # User blocked bot etc.
+    import threading
+    def run_broadcast(msg, requester_id):
+        all_users = list(users_repo.collection.find({}))
+        success_count = 0
+        total = len(all_users)
+        
+        for i, u in enumerate(all_users):
+            target_id = u.get("id")
+            try:
+                if msg.content_type == "text":
+                    bot.send_message(target_id, msg.text)
+                elif msg.content_type == "photo":
+                    bot.send_photo(target_id, msg.photo[-1].file_id, caption=msg.caption)
+                elif msg.content_type == "document":
+                    bot.send_document(target_id, msg.document.file_id, caption=msg.caption)
+                elif msg.content_type == "video":
+                    bot.send_video(target_id, msg.video.file_id, caption=msg.caption)
+                elif msg.content_type == "audio":
+                    bot.send_audio(target_id, msg.audio.file_id, caption=msg.caption)
+                elif msg.content_type == "voice":
+                    bot.send_voice(target_id, msg.voice.file_id, caption=msg.caption)
+                success_count += 1
+            except Exception:
+                pass
             
-    bot.send_message(user_id, f"✅ Broadcast complete. Sent to {count} users.")
+            # Rate limiting: 20 messages per second (Telegram's limit)
+            if (i + 1) % 20 == 0:
+                time.sleep(1)
+        
+        try:
+            bot.send_message(requester_id, f"✅ Broadcast complete.\nSent to: {success_count} / {total} users.")
+        except:
+            pass
+
+    threading.Thread(target=run_broadcast, args=(broadcast_msg, user_id), daemon=True).start()
     pending_notes.pop(user_id, None)
 
 

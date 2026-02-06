@@ -29,4 +29,12 @@ class SchedulesRepository:
         )
 
     def get_user_schedules(self, user_id: int) -> List[Dict[str, Any]]:
-        return list(self.collection.find({"user_id": user_id}).sort("scheduled_at", -1))
+        # Only show upcoming (pending and future) schedules
+        now = datetime.now()
+        return list(
+            self.collection.find({
+                "user_id": user_id, 
+                "status": "pending",
+                "scheduled_at": {"$gt": now}
+            }).sort("scheduled_at", 1)
+        )
