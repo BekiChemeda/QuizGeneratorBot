@@ -193,19 +193,23 @@ def handle_faq(call: CallbackQuery):
     except Exception:
         pass
     text = (
-        "📚 Frequently Asked Questions (FAQs)\n\n"
-        "1) Why limits? Resource management.\n"
-        "2) 24/7? Use a VPS for always-on.\n"
-        "3) Why slow? Free hosting limits.\n"
-        "4) Updates? Yes, more features coming.\n"
-        "5) Note size? Up to Telegram limits (~4096 chars).\n"
-        "6) AI? Gemini by Google.\n"
-        "7) Poll mode? Settings → Question Type → Poll.\n"
+        "📚 **Frequently Asked Questions (FAQs)**\n\n"
+        "1️⃣ **How do I create a quiz?**\n"
+        "Simply send a text note, upload a document (PDF, DOCX, PPTX, TXT), or paste a YouTube link. The AI will analyze the content and generate questions for you.\n\n"
+        "2️⃣ **What file formats are supported?**\n"
+        "We support PDF, Word (.docx), PowerPoint (.pptx), and Text (.txt) files. Max file size is 20MB.\n\n"
+        "3️⃣ **Can I generate quizzes from YouTube?**\n"
+        "Yes! Just send the YouTube URL. The bot extracts the transcript or audio to create your quiz.\n\n"
+        "4️⃣ **Is there a limit on usage?**\n"
+        "Free users can generate up to 5 quizzes with 10 questions each. Premium users enjoy higher limits (10 quizzes, 20 questions).\n\n"
+        "5️⃣ **How do I get Premium?**\n"
+        "Open the main menu and click on 💎 **Premium**. Follow the instructions there to upgrade your account.\n\n"
+        "6️⃣ **What AI technology is used?**\n"
+        "The bot is powered by Google's **Gemini AI**, ensuring high-quality and contextually accurate quiz questions.\n\n"
+        "7️⃣ **Can I change the question type?**\n"
+        "Yes! Go to **Settings** → **Question Type** to choose between 'Text' (multiple choice in message) or 'Poll' (Telegram native polls)."
     )
-    bot.send_message(call.message.chat.id, text, reply_markup=home_keyboard()) # Using home_keyboard (Back to Home) is safer here as it likely uses utils.py logic? No, let's stick to utils home_keyboard for sub-menus, or main_menu(user_id)? 
-    # Actually, FAQ usually has a 'Back' button, which is home_keyboard().
-    # The error is explicitly main_menu() calls.
-    # Let me check where main_menu() is called.
+    bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=home_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data == "about")
 def handle_about(call: CallbackQuery):
@@ -1642,25 +1646,6 @@ def handle_home(call: CallbackQuery):
     user_id = call.from_user.id
     pending_notes.pop(user_id, None)
     handle_start(call.message)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "faq")
-def handle_faq(call: CallbackQuery):
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
-    text = (
-        "📚 Frequently Asked Questions (FAQs)\n\n"
-        "1) Why limits? Resource management.\n"
-        "2) 24/7? Use a VPS for always-on.\n"
-        "3) Why slow? Free hosting limits.\n"
-        "4) Updates? Yes, more features coming.\n"
-        "5) Note size? Up to Telegram limits (~4096 chars).\n"
-        "6) AI? Gemini by Google.\n"
-        "7) Poll mode? Settings → Question Type → Poll.\n"
-    )
-    bot.send_message(call.message.chat.id, text, reply_markup=home_keyboard())
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "about")
