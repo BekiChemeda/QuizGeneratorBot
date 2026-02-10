@@ -151,7 +151,8 @@ def handle_start(message: Message):
         return
 
     if not is_subscribed(bot, user_id):
-        channels_txt = "\n".join(cfg.force_channels) if cfg.force_channels else ""
+        channels = settings_repo.get("force_channels", cfg.force_channels) if settings_repo else cfg.force_channels
+        channels_txt = "\n".join(channels) if channels else ""
         bot.send_message(user_id, f"Please join required channels to use the bot:\n{channels_txt}")
         return
 
