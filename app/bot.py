@@ -61,6 +61,21 @@ schedules_repo = SchedulesRepository(db) if db is not None else None
 quizzes_repo = QuizzesRepository(db) if db is not None else None
 
 bot = TeleBot(cfg.bot_token)
+BOT_INFO = None
+
+def get_bot_info():
+    global BOT_INFO
+    if BOT_INFO is None:
+        try:
+            BOT_INFO = bot.get_me()
+        except Exception:
+            # Fallback if network is unreachable on startup
+            class MockBot:
+                def __init__(self):
+                    self.username = "Bot"
+                    self.id = 0
+            return MockBot()
+    return BOT_INFO
 if db is not None:
     scheduler = QuizScheduler(db, bot)
     scheduler.start()
@@ -81,13 +96,26 @@ def error_handler(func):
                 user_id = args[0].from_user.id
             
             error_msg = f"Error in {func.__name__}: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
+            # Don't notify admins for common network timeout or old query errors
+            ignored_errors = [
+                "query is too old",
+                "Network is unreachable",
+                "Read timed out",
+                "connection was forcibly closed",
+                "Max retries exceeded",
+                "Bad Request: query ID is invalid"
+            ]
             
-            if db is not None:
+            is_ignored = any(ignored in str(e) for ignored in ignored_errors)
+            
+            logger.error(error_msg)
+            if not is_ignored:
+                logger.error(traceback.format_exc())
+            
+            if db is not None and not is_ignored:
                 notify_admins(bot, f"⚠️ Error in `{func.__name__}`:\n`{str(e)}`", db)
             
-            if user_id:
+            if user_id and not is_ignored:
                 try:
                     bot.send_message(user_id, "An unexpected error occurred. The admins have been notified.")
                 except Exception:
@@ -174,7 +202,7 @@ def handle_start(message: Message):
         "- Choose between text or quiz mode\n"
         "- Deliver to PM or your channel\n"
         "- Configure delay and schedule delivery\n\n"
-        f"Your referral link: https://t.me/{bot.get_me().username}?start=ref{user_id}\n"
+        f"Your referral link: https://t.me/{get_bot_info().username}?start=ref{user_id}\n"
         "Invite 2 users to get Premium!\n\n"
         "Your support makes this bot better!"
     )
@@ -728,7 +756,7 @@ def handle_channel_forward(message: Message):
         if member.status not in ["administrator", "creator"]:
             bot.reply_to(message, "You must be admin of that channel.")
             return
-        bot_member = bot.get_chat_member(chat_id, bot.get_me().id)
+        bot_member = bot.get_chat_member(chat_id, get_bot_info().id)
         can_post = bot_member.status in ["administrator", "creator"]
         channels_repo.add_channel(user_id, chat_id, title, username, can_post)
         bot.reply_to(message, f"Channel saved: {title}")
@@ -764,7 +792,7 @@ def handle_channel_username(message: Message):
         if member.status not in ["administrator", "creator"]:
             bot.reply_to(message, "You must be admin of that channel.")
             return
-        bot_member = bot.get_chat_member(chat.id, bot.get_me().id)
+        bot_member = bot.get_chat_member(chat.id, get_bot_info().id)
         can_post = bot_member.status in ["administrator", "creator"]
         channels_repo.add_channel(user_id, chat.id, chat.title or "Channel", chat.username, can_post)
         bot.reply_to(message, f"Channel saved: {chat.title}")
@@ -903,7 +931,7 @@ def handle_export_quiz(call: CallbackQuery):
         file_io = None
         filename = f"{title[:20]}_{fmt}.{fmt}".replace(" ", "_")
         
-        bot_username = bot.get_me().username or "SmartQuizBot"
+        bot_username = get_bot_info().username or "SmartQuizBot"
 
         if fmt == "pdf":
             file_io = QuizExporter.to_pdf(title, questions, bot_username)
@@ -926,20 +954,19 @@ def handle_export_quiz(call: CallbackQuery):
 @bot.callback_query_handler(func=lambda call: call.data == "generate")
 @error_handler
 def handle_generate(call: CallbackQuery):
+    bot.answer_callback_query(call.id)
     user_id = call.from_user.id
     users_repo.reset_notes_if_new_day(user_id)
 
     if not is_subscribed(bot, user_id):
-        bot.answer_callback_query(call.id, "Please join required channels first.")
         bot.send_message(user_id, "Please Join All Our Channels!\n/start - To start again")
         return
 
     if not has_quota(db, user_id):
-        bot.answer_callback_query(call.id, "You have reached your daily limit. Add your own Gemini API key in Settings to increase limits.")
+        bot.send_message(user_id, "You have reached your daily limit. Add your own Gemini API key in Settings to increase limits.")
         return
 
     pending_notes[user_id] = {"stage": "await_input_type"}
-    bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("📝 Use a Note", callback_data="input_note"),
