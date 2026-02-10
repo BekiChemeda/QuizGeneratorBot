@@ -96,7 +96,6 @@ def error_handler(func):
                 user_id = args[0].from_user.id
             
             error_msg = f"Error in {func.__name__}: {str(e)}"
-            # Don't notify admins for common network timeout or old query errors
             ignored_errors = [
                 "query is too old",
                 "Network is unreachable",
