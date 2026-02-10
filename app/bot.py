@@ -184,13 +184,13 @@ def handle_start(message: Message):
         kb.add(InlineKeyboardButton("🔄 Check Subscription", callback_data="home"))
         
         msg_text = (
-            "📢 **Requirement to Continue**\n\n"
+            "📢 <b>Requirement to Continue</b>\n\n"
             "To ensure you receive updates on new features, bug fixes, and announcements about new bots, "
             "please join the following channels. This is not for promotion, but for keeping you informed:\n\n"
             f"{channels_txt}"
         )
         
-        bot.send_message(user_id, msg_text, parse_mode="Markdown", reply_markup=kb)
+        bot.send_message(user_id, msg_text, parse_mode="HTML", reply_markup=kb)
         return
 
     text = (
@@ -218,16 +218,16 @@ def handle_home(call: CallbackQuery):
         kb.add(InlineKeyboardButton("🔄 Check Subscription", callback_data="home"))
         
         msg_text = (
-            "📢 **Requirement to Continue**\n\n"
+            "📢 <b>Requirement to Continue</b>\n\n"
             "To ensure you receive updates on new features, bug fixes, and announcements about new bots, "
             "please join the following channels. This is not for promotion, but for keeping you informed:\n\n"
             f"{channels_txt}"
         )
         
         try:
-            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
+            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
         except Exception:
-            bot.send_message(user_id, msg_text, parse_mode="Markdown", reply_markup=kb)
+            bot.send_message(user_id, msg_text, parse_mode="HTML", reply_markup=kb)
         return
 
     pending_notes.pop(user_id, None)
