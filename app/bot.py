@@ -153,7 +153,17 @@ def handle_start(message: Message):
     if not is_subscribed(bot, user_id):
         channels = settings_repo.get("force_channels", cfg.force_channels) if settings_repo else cfg.force_channels
         channels_txt = "\n".join(channels) if channels else ""
-        bot.send_message(user_id, f"Please join required channels to use the bot:\n{channels_txt}")
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🔄 Check Subscription", callback_data="home"))
+        
+        msg_text = (
+            "📢 **Requirement to Continue**\n\n"
+            "To ensure you receive updates on new features, bug fixes, and announcements about new bots, "
+            "please join the following channels. This is not for promotion, but for keeping you informed:\n\n"
+            f"{channels_txt}"
+        )
+        
+        bot.send_message(user_id, msg_text, parse_mode="Markdown", reply_markup=kb)
         return
 
     text = (
@@ -174,6 +184,25 @@ def handle_start(message: Message):
 @bot.callback_query_handler(func=lambda call: call.data == "home")
 def handle_home(call: CallbackQuery):
     user_id = call.from_user.id
+    if not is_subscribed(bot, user_id):
+        channels = settings_repo.get("force_channels", cfg.force_channels) if settings_repo else cfg.force_channels
+        channels_txt = "\n".join(channels) if channels else ""
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🔄 Check Subscription", callback_data="home"))
+        
+        msg_text = (
+            "📢 **Requirement to Continue**\n\n"
+            "To ensure you receive updates on new features, bug fixes, and announcements about new bots, "
+            "please join the following channels. This is not for promotion, but for keeping you informed:\n\n"
+            f"{channels_txt}"
+        )
+        
+        try:
+            bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
+        except Exception:
+            bot.send_message(user_id, msg_text, parse_mode="Markdown", reply_markup=kb)
+        return
+
     pending_notes.pop(user_id, None)
     try:
         bot.edit_message_text(
@@ -1640,13 +1669,6 @@ def set_questions_per_note(call: CallbackQuery):
     users_repo.set_questions_per_note(user_id, new_value)
     bot.answer_callback_query(call.id, f"Updated to {new_value} questions per note.")
     handle_settings(call)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "home")
-def handle_home(call: CallbackQuery):
-    user_id = call.from_user.id
-    pending_notes.pop(user_id, None)
-    handle_start(call.message)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "about")
