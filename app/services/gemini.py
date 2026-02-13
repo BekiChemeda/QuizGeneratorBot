@@ -88,12 +88,8 @@ Source:
         else:
              contents.append(prompt_text)
 
-        # Use gemini-2.0-flash-exp for media inputs as requested/required for multimodal
-        # Use gemini-2.5-flash for text-only for stability/speed
-        if media_data:
-            model_id = "gemini-2.0-flash-exp"
-        else:
-            model_id = "gemini-2.5-flash"
+        # Use gemini-2.5-flash for all inputs (supports multimodal including audio)
+        model_id = "gemini-2.5-flash"
         
         response = client.models.generate_content(
             model=model_id,

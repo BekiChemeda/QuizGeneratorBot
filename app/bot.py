@@ -1162,11 +1162,19 @@ def handle_note_submission(message: Message):
 @error_handler
 def handle_youtube_submission(message: Message):
     user_id = message.from_user.id
-    url = message.text or ""
-    processing = bot.reply_to(message, "Fetching content (Transcript or Audio)...")
+    url = (message.text or "").strip()
+    
+    if not url:
+        bot.reply_to(message, "⚠️ Please send a valid YouTube URL.")
+        return
+
+    processing = bot.reply_to(message, "🔄 Fetching YouTube content (transcript or audio)...\nThis may take up to 60 seconds.")
     try:
         text, audio_data, mime_type, video_title, video_description = get_youtube_transcript(url)
-        bot.delete_message(message.chat.id, processing.message_id)
+        try:
+            bot.delete_message(message.chat.id, processing.message_id)
+        except Exception:
+            pass
         
         # Use video title as the quiz title
         if video_title:
@@ -1177,27 +1185,43 @@ def handle_youtube_submission(message: Message):
         elif audio_data:
             pending_notes[user_id]["media_data"] = audio_data
             pending_notes[user_id]["mime_type"] = mime_type
-            # Add video description as context if available
             if video_description:
-                # Truncate description to reasonable length
                 context = video_description[:500] if len(video_description) > 500 else video_description
                 pending_notes[user_id]["note"] = f"Video Description: {context}"
         else:
-             bot.send_message(user_id, "Could not fetch content. Video might be restricted or too long.")
-             return
+            bot.send_message(user_id, "❌ Could not fetch any content from this video.\n\nPossible reasons:\n• Video has no subtitles/captions\n• Video is age-restricted or region-locked\n• Audio could not be downloaded\n\nTry a different video.", reply_markup=home_keyboard())
+            pending_notes.pop(user_id, None)
+            return
 
         try:
             bot.delete_message(message.chat.id, message.message_id)
         except:
             pass
         ask_difficulty(user_id)
+    except ValueError as e:
+        logger.error(f"YouTube URL Error: {e}")
+        try:
+            bot.delete_message(message.chat.id, processing.message_id)
+        except:
+            pass
+        bot.send_message(user_id, f"⚠️ {e}", reply_markup=home_keyboard())
+        pending_notes.pop(user_id, None)
+    except RuntimeError as e:
+        logger.error(f"YouTube Error: {e}")
+        try:
+            bot.delete_message(message.chat.id, processing.message_id)
+        except:
+            pass
+        bot.send_message(user_id, f"❌ {e}", reply_markup=home_keyboard())
+        pending_notes.pop(user_id, None)
     except Exception as e:
         logger.error(f"YouTube Error: {e}")
         try:
-             bot.delete_message(message.chat.id, processing.message_id)
+            bot.delete_message(message.chat.id, processing.message_id)
         except:
-             pass
-        bot.send_message(user_id, "Failed to process YouTube video. Please try a shorter video or check the URL.")
+            pass
+        bot.send_message(user_id, "❌ Failed to process YouTube video.\n\nPlease try:\n• A different/shorter video\n• A video with English subtitles\n• Check the URL is correct", reply_markup=home_keyboard())
+        pending_notes.pop(user_id, None)
 
 
 @bot.message_handler(content_types=["audio", "voice"], func=lambda m: m.from_user and m.from_user.id in pending_notes and pending_notes[m.from_user.id].get("stage") == "await_audio")
@@ -1206,34 +1230,44 @@ def handle_audio_submission(message: Message):
     user_id = message.from_user.id
     
     file_info = message.voice or message.audio
-    if file_info.file_size > 20 * 1024 * 1024:
+    if not file_info:
+        bot.reply_to(message, "⚠️ Could not detect audio file. Please send a voice note or audio file (MP3/OGG/WAV).")
+        return
+
+    if file_info.file_size and file_info.file_size > 20 * 1024 * 1024:
         bot.reply_to(message, "⚠️ File is too big. Please send audio files under 20MB.")
         return
 
     file_id = file_info.file_id
-    mime_type = file_info.mime_type
+    mime_type = getattr(file_info, "mime_type", None) or "audio/ogg"
     
-    processing = bot.reply_to(message, "Downloading audio...")
+    processing = bot.reply_to(message, "🔄 Processing audio...")
     try:
         file_path = bot.get_file(file_id).file_path
         downloaded_file = bot.download_file(file_path)
         
-        if not downloaded_file:
-             raise ValueError("Download failed")
-             
+        if not downloaded_file or len(downloaded_file) == 0:
+            raise ValueError("Download returned empty data")
+              
         pending_notes[user_id]["media_data"] = downloaded_file
-        pending_notes[user_id]["mime_type"] = mime_type or "audio/ogg" 
+        pending_notes[user_id]["mime_type"] = mime_type
         pending_notes[user_id]["title"] = "Audio Note"
         
-        bot.delete_message(message.chat.id, processing.message_id)
+        try:
+            bot.delete_message(message.chat.id, processing.message_id)
+        except:
+            pass
         try:
             bot.delete_message(message.chat.id, message.message_id)
         except:
             pass
         ask_difficulty(user_id)
     except Exception as e:
-         logger.error(f"Audio processing error: {e}")
-         bot.edit_message_text("Error processing audio. Please try again.", message.chat.id, processing.message_id)
+        logger.error(f"Audio processing error: {e}")
+        try:
+            bot.edit_message_text("❌ Error processing audio. Please try again with a different file.", message.chat.id, processing.message_id)
+        except:
+            bot.send_message(user_id, "❌ Error processing audio. Please try again.")
 
 
 # (Rest of code continues...)

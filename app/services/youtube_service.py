@@ -3,10 +3,8 @@ import os
 import glob
 import time
 import shutil
+import traceback
 from typing import Tuple, Optional, Iterable
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import TextFormatter
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
@@ -54,8 +52,68 @@ def cleanup_temp_files(pattern: str = f"{TEMP_AUDIO_PREFIX}*", max_retries: int 
 
 
 # -----------------------
-# Transcript functions (uses youtube-transcript-api properly)
+# Transcript functions — compatible with youtube-transcript-api v0.x and v1.x
 # -----------------------
+
+def _try_import_transcript_api():
+    """Import transcript API components with compatibility for both old and new versions."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return None, None, None, None
+
+    # Try importing error classes (location varies by version)
+    TranscriptsDisabled = None
+    NoTranscriptFound = None
+    try:
+        from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+    except ImportError:
+        try:
+            from youtube_transcript_api import TranscriptsDisabled, NoTranscriptFound
+        except ImportError:
+            pass
+
+    # Try importing TextFormatter (may not exist in newer versions)
+    TextFormatter = None
+    try:
+        from youtube_transcript_api.formatters import TextFormatter
+    except ImportError:
+        pass
+
+    return YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, TextFormatter
+
+
+def _format_transcript(fetched, text_formatter_cls=None) -> str:
+    """
+    Convert fetched transcript data to plain text.
+    Works with both old-style list-of-dicts and new FetchedTranscript objects.
+    """
+    # Try TextFormatter first if available
+    if text_formatter_cls is not None:
+        try:
+            formatter = text_formatter_cls()
+            result = formatter.format_transcript(fetched)
+            if result and result.strip():
+                return result.strip()
+        except Exception:
+            pass
+
+    # Manual extraction — handles list of dicts or FetchedTranscript (iterable of snippet objects)
+    parts = []
+    try:
+        for item in fetched:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+            else:
+                text = getattr(item, "text", str(item))
+            if text:
+                parts.append(text.strip())
+    except Exception:
+        pass
+
+    return " ".join(parts)
+
+
 def clean_transcript(text: str) -> str:
     """Minimal cleaning: normalize whitespace and preserve paragraph breaks."""
     text = re.sub(r"[ \t]+", " ", text)
@@ -64,102 +122,85 @@ def clean_transcript(text: str) -> str:
     return "\n".join([ln for ln in lines if ln]).strip()
 
 
-def fetch_transcript_object(video_id: str, api: Optional[YouTubeTranscriptApi] = None,
-                            preferred_languages: Optional[Iterable[str]] = None):
+def get_transcript_with_fallback(video_id: str, preferred_languages: Optional[Iterable[str]] = None) -> Optional[str]:
     """
-    Fetch transcript object(s) using youtube-transcript-api.
-    Returns a FetchedTranscript-like object (or raises).
-    - preferred_languages: list of language codes in preference order (defaults to ['en'])
-    - api: optional YouTubeTranscriptApi instance (useful for proxy_config or custom http session)
+    Attempts to fetch transcript using multiple strategies:
+      1. Direct fetch() with preferred languages
+      2. List transcripts and find manual/generated English
+      3. Try translating first available to English
+      4. Use any available transcript as last resort
+    Returns cleaned transcript text or None.
     """
-    if api is None:
-        api = YouTubeTranscriptApi()
+    YTApi, TranscriptsDisabled, NoTranscriptFound, TextFormatterCls = _try_import_transcript_api()
+    if YTApi is None:
+        print("youtube-transcript-api not installed")
+        return None
 
+    api = YTApi()
     if preferred_languages is None:
         preferred_languages = ["en"]
 
-    # youtube-transcript-api provides .fetch and .list (and .list_transcripts / .list depending on version)
-    # the public API: YouTubeTranscriptApi().fetch(video_id, languages=[...])
-    return api.fetch(video_id, languages=list(preferred_languages))
+    # Build error classes tuple for catching
+    transcript_errors = tuple(filter(None, [TranscriptsDisabled, NoTranscriptFound, Exception]))
 
-
-def get_transcript_with_fallback(video_id: str, api: Optional[YouTubeTranscriptApi] = None,
-                                 preferred_languages: Optional[Iterable[str]] = None) -> Optional[str]:
-    """
-    Attempts steps (in order):
-      1. fetch() with preferred_languages (defaults to ['en'])
-      2. list() transcripts and:
-         - try find_transcript(['en'])
-         - try find_generated_transcript(['en'])
-         - try translating first available transcript to English
-    Returns cleaned text or None.
-    """
-    if api is None:
-        api = YouTubeTranscriptApi()
-
-    if preferred_languages is None:
-        preferred_languages = ["en"]
-
-    # 1) Try direct fetch with preferred languages (convenient single-call)
+    # Strategy 1: Direct fetch
     try:
         fetched = api.fetch(video_id, languages=list(preferred_languages))
-        # fetched is iterable FetchedTranscript
-        formatter = TextFormatter()
-        raw = formatter.format_transcript(fetched)
-        return clean_transcript(raw)
-    except (TranscriptsDisabled, NoTranscriptFound):
-        return None
-    except Exception:
-        # If fetch() failed fall back to listing and manual selection
-        pass
+        raw = _format_transcript(fetched, TextFormatterCls)
+        if raw and len(raw.strip()) > 50:
+            return clean_transcript(raw)
+    except Exception as e:
+        print(f"Transcript fetch attempt 1 failed: {e}")
 
-    # 2) Fallback: list transcripts and pick best option
+    # Strategy 2: List and find manual/generated transcripts  
     try:
-        transcript_list = api.list(video_id)  # returns TranscriptList
-    except Exception:
-        # listing failed — surface None
+        transcript_list = api.list(video_id)
+    except Exception as e:
+        print(f"Transcript list failed: {e}")
         return None
 
-    # Prefer manual 'en'
+    # Try finding English transcript (manual)
     try:
-        t = transcript_list.find_transcript(['en'])
+        t = transcript_list.find_transcript(["en"])
         data = t.fetch()
-        raw = TextFormatter().format_transcript(data)
-        return clean_transcript(raw)
-    except NoTranscriptFound:
-        pass
+        raw = _format_transcript(data, TextFormatterCls)
+        if raw and len(raw.strip()) > 50:
+            return clean_transcript(raw)
     except Exception:
         pass
 
-    # Try auto-generated english
+    # Try auto-generated English
     try:
-        t = transcript_list.find_generated_transcript(['en'])
-        data = t.fetch()
-        raw = TextFormatter().format_transcript(data)
-        return clean_transcript(raw)
-    except NoTranscriptFound:
-        pass
+        if hasattr(transcript_list, "find_generated_transcript"):
+            t = transcript_list.find_generated_transcript(["en"])
+            data = t.fetch()
+            raw = _format_transcript(data, TextFormatterCls)
+            if raw and len(raw.strip()) > 50:
+                return clean_transcript(raw)
     except Exception:
         pass
 
-    # Try translating the first available transcript to English (if translatable)
+    # Strategy 3: Translate first available transcript to English
     try:
         available = list(transcript_list)
-        if not available:
-            return None
-        first = available[0]
-        if getattr(first, "is_translatable", False):
-            translated = first.translate("en")
-            data = translated.fetch()
-            raw = TextFormatter().format_transcript(data)
-            return clean_transcript(raw)
-        else:
-            # If not translatable, just fetch the first available raw and return raw text (best-effort)
+        if available:
+            first = available[0]
+            if getattr(first, "is_translatable", False):
+                translated = first.translate("en")
+                data = translated.fetch()
+                raw = _format_transcript(data, TextFormatterCls)
+                if raw and len(raw.strip()) > 50:
+                    return clean_transcript(raw)
+
+            # Strategy 4: Just use the first available transcript (any language)
             data = first.fetch()
-            raw = TextFormatter().format_transcript(data)
-            return clean_transcript(raw)
-    except Exception:
-        return None
+            raw = _format_transcript(data, TextFormatterCls)
+            if raw and len(raw.strip()) > 50:
+                return clean_transcript(raw)
+    except Exception as e:
+        print(f"Transcript fallback failed: {e}")
+
+    return None
 
 
 # -----------------------
@@ -180,7 +221,7 @@ def get_video_metadata(url: str) -> Tuple[Optional[str], Optional[str]]:
 # Audio download (robust)
 # -----------------------
 def _attempt_download_with_format(url: str, fmt: str, outtmpl: str, has_ffmpeg: bool, headers: dict) -> Optional[str]:
-    """Try a single format; returns downloaded file path or None."""
+    """Try a single format; returns True on success, None on failure."""
     ydl_opts = {
         "format": fmt,
         "outtmpl": outtmpl,
@@ -188,11 +229,10 @@ def _attempt_download_with_format(url: str, fmt: str, outtmpl: str, has_ffmpeg: 
         "quiet": True,
         "no_warnings": True,
         "http_headers": headers,
-        # set retries to handle transient network issues
-        "retries": 2,
+        "retries": 3,
+        "socket_timeout": 30,
     }
     if has_ffmpeg:
-        # convert to mp3 small bitrate
         ydl_opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -201,15 +241,13 @@ def _attempt_download_with_format(url: str, fmt: str, outtmpl: str, has_ffmpeg: 
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            # when a postprocessor runs, output file will be <outtmpl>.mp3 by default
-            # yt-dlp doesn't always expose final filename; we search for files after download
+            ydl.extract_info(url, download=True)
             return True
     except DownloadError as de:
-        # common download errors include 403, requested format not available, etc.
-        # return None and let caller try next format
+        print(f"Download format '{fmt}' failed: {de}")
         return None
-    except Exception:
+    except Exception as e:
+        print(f"Download format '{fmt}' error: {e}")
         return None
 
 
@@ -229,29 +267,24 @@ def download_audio(url: str, max_audio_mb: int = DEFAULT_MAX_AUDIO_MB, headers: 
     has_ffmpeg = is_ffmpeg_available()
     outtmpl = TEMP_AUDIO_PREFIX  # yt-dlp will append extension
 
-    # Prefer formats in order — these capture many server combos
     format_candidates = [
-        "bestaudio[ext=webm]/bestaudio/best",
-        "bestaudio[ext=m4a]/bestaudio/best",
+        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
         "bestaudio/best",
-        "best",  # final fallback
+        "worstaudio",  # very small audio as last resort
+        "best",
     ]
 
-    # Try each format until one succeeds; limit retries to avoid long blocking
     for fmt in format_candidates:
         ok = _attempt_download_with_format(url, fmt, outtmpl, has_ffmpeg, headers)
         if ok:
-            # find candidate files
             files = [f for f in glob.glob(f"{TEMP_AUDIO_PREFIX}*") if not f.endswith(".part") and ".part-" not in f]
             if not files:
                 cleanup_temp_files()
                 continue
 
-            # pick most recent
             files.sort(key=os.path.getmtime, reverse=True)
             fp = files[0]
 
-            # Ensure size under limit
             try:
                 size_bytes = os.path.getsize(fp)
             except Exception:
@@ -259,31 +292,30 @@ def download_audio(url: str, max_audio_mb: int = DEFAULT_MAX_AUDIO_MB, headers: 
                 continue
 
             if size_bytes > max_audio_mb * 1024 * 1024:
-                # too large; clean and try next format candidate
                 cleanup_temp_files()
                 continue
 
-            # Read bytes
+            if size_bytes == 0:
+                cleanup_temp_files()
+                continue
+
             try:
                 with open(fp, "rb") as fh:
                     data = fh.read()
+            except Exception:
+                cleanup_temp_files()
+                continue
             finally:
                 cleanup_temp_files()
 
-            # Returned MIME: prefer audio/mp3 if ffmpeg conversion was done, otherwise guess by extension
             if has_ffmpeg:
                 return data, "audio/mp3"
             else:
-                # guess mime
                 ext = os.path.splitext(fp)[1].lower()
-                if ext in (".webm", ".m4a", ".mp4", ".opus"):
-                    return data, f"audio/{ext.lstrip('.')}"
-                return data, "audio/octet-stream"
+                mime_map = {".webm": "audio/webm", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".opus": "audio/opus", ".mp3": "audio/mp3", ".ogg": "audio/ogg"}
+                return data, mime_map.get(ext, "audio/octet-stream")
 
-    # All attempts failed
-    # Provide a helpful message advising proxies or cookies for age-restricted content
-    print("Audio download failed for all format fallbacks. Possible causes: 403/format not available/region restriction.")
-    print("If you run this from a cloud IP, consider using rotating residential proxies. If the video is age-restricted, cookies may be required.")
+    print("Audio download failed for all format fallbacks.")
     cleanup_temp_files()
     return None, None
 
@@ -291,51 +323,43 @@ def download_audio(url: str, max_audio_mb: int = DEFAULT_MAX_AUDIO_MB, headers: 
 # -----------------------
 # Public function (keeps same return signature)
 # -----------------------
-def get_youtube_transcript(url: str, proxy_config: Optional[object] = None,
-                           http_client: Optional[object] = None,
-                           max_audio_mb: int = DEFAULT_MAX_AUDIO_MB) -> Tuple[Optional[str], Optional[bytes], Optional[str], Optional[str], Optional[str]]:
+def get_youtube_transcript(url: str, max_audio_mb: int = DEFAULT_MAX_AUDIO_MB) -> Tuple[Optional[str], Optional[bytes], Optional[str], Optional[str], Optional[str]]:
     """
     Main convenience function:
       returns (transcript_text, audio_bytes, mime_type, title, description)
 
-    Optional args:
-      proxy_config: pass a youtube_transcript_api proxy_config (e.g. WebshareProxyConfig) if you have one
-      http_client: pass a requests.Session-like object for custom headers/cookies
-      max_audio_mb: maximum audio size accepted (default 20)
+    Tries transcript first, falls back to audio download if not available.
     """
     video_id = extract_video_id(url)
     if not video_id:
-        raise ValueError("Invalid YouTube URL")
+        raise ValueError("Invalid YouTube URL — could not extract video ID. Please send a full YouTube link (e.g. https://www.youtube.com/watch?v=...)")
 
-    # metadata (best-effort)
+    # Get metadata (best-effort, non-blocking)
     title, description = get_video_metadata(url)
 
-    # create YouTubeTranscriptApi instance if proxy_config or http_client provided
+    # Try to get transcript
     try:
-        if proxy_config is not None or http_client is not None:
-            # instantiate with provided options (constructor supports proxy_config and http_client)
-            api = YouTubeTranscriptApi(proxy_config=proxy_config, http_client=http_client) if proxy_config or http_client else YouTubeTranscriptApi()
-        else:
-            api = YouTubeTranscriptApi()
-    except Exception:
-        api = YouTubeTranscriptApi()  # fallback to default
+        transcript_text = get_transcript_with_fallback(video_id, preferred_languages=["en"])
+        if transcript_text and len(transcript_text.strip()) > 50:
+            return transcript_text, None, None, title, description
+    except Exception as e:
+        print(f"Transcript extraction error: {e}")
 
-    # try to get transcript (preferred english)
-    transcript_text = get_transcript_with_fallback(video_id, api=api, preferred_languages=["en"])
-    if transcript_text:
-        return transcript_text, None, None, title, description
+    # Transcript not available → download audio
+    print("Transcript not available — attempting audio download...")
+    try:
+        audio_data, mime = download_audio(url, max_audio_mb=max_audio_mb, headers=HTTP_HEADERS)
+        if audio_data and len(audio_data) > 0:
+            return None, audio_data, mime, title, description
+    except Exception as e:
+        print(f"Audio download error: {e}")
 
-    # transcript not available -> download audio
-    print("Transcript not available or blocked — attempting audio download.")
-    audio_data, mime = download_audio(url, max_audio_mb=max_audio_mb, headers=HTTP_HEADERS)
-
-    if audio_data:
-        return None, audio_data, mime, title, description
-
-    # If we get here, both transcript and audio failed. Raise with helpful guidance.
+    # Both failed
     raise RuntimeError(
-        "Could not retrieve transcript or download audio. Possible reasons: "
-        "transcripts disabled, IP blocked, age-restriction, or video unavailable. "
-        "Consider using rotating residential proxies (see youtube-transcript-api docs), "
-        "supplying cookies, or running from a different IP."
+        "Could not retrieve transcript or download audio.\n"
+        "Possible reasons:\n"
+        "• Video has no captions/subtitles\n"
+        "• Video is age-restricted or region-locked\n"
+        "• Video is too long or unavailable\n"
+        "Try a different video or a shorter one."
     )
