@@ -19,6 +19,8 @@ from .repositories.payments import PaymentsRepository
 from .repositories.schedules import SchedulesRepository
 from .repositories.stats import StatsRepository
 from .repositories.quizzes import QuizzesRepository
+from .repositories.battles import BattlesRepository
+from .repositories.progress import ProgressRepository
 from .services.exporter import QuizExporter
 from .services.gemini import generate_questions, validate_gemini_api_key
 from .services.file_parser import fetch_and_parse_file, chunk_text
@@ -59,6 +61,8 @@ payments_repo = PaymentsRepository(db) if db is not None else None
 payments_repo = PaymentsRepository(db) if db is not None else None
 schedules_repo = SchedulesRepository(db) if db is not None else None
 quizzes_repo = QuizzesRepository(db) if db is not None else None
+battles_repo = BattlesRepository(db) if db is not None else None
+progress_repo = ProgressRepository(db) if db is not None else None
 
 bot = TeleBot(cfg.bot_token)
 BOT_INFO = None
@@ -83,6 +87,8 @@ if db is not None:
 pending_notes: dict[int, dict] = {}
 pending_subscriptions: dict[int, dict] = {}
 pending_keys: dict[int, dict] = {}
+pending_quizzes: dict[int, dict] = {}  # Interactive quiz sessions
+pending_battles: dict[int, dict] = {}  # Battle quiz sessions
 
 
 def error_handler(func):
@@ -131,6 +137,8 @@ def main_menu(user_id: int) -> InlineKeyboardMarkup:
     kb.add(
         InlineKeyboardButton("📝 Generate", callback_data="generate"),
         InlineKeyboardButton("👤 Profile", callback_data="profile"),
+        InlineKeyboardButton("📈 Progress", callback_data="progress"),
+        InlineKeyboardButton("🏆 Battles", callback_data="battle_menu"),
         InlineKeyboardButton("📢 My Channels", callback_data="channels"),
         InlineKeyboardButton("📂 My Quizzes", callback_data="my_quizzes"),
         InlineKeyboardButton("⏰ Schedule", callback_data="schedule_menu"),
@@ -151,27 +159,30 @@ def handle_start(message: Message):
     username = message.from_user.username
     display_name = message.from_user.first_name or username or "Someone"
     
-    # Check for referral args
+    # Check for deep link args
     parts = message.text.split()
     referrer_id = None
-    if len(parts) > 1 and parts[1].startswith("ref"):
-        try:
-            referrer_id = int(parts[1][3:])
-        except ValueError:
-            pass
+    deep_link_quiz_id = None
+    deep_link_battle_id = None
+    if len(parts) > 1:
+        arg = parts[1]
+        if arg.startswith("ref"):
+            try:
+                referrer_id = int(arg[3:])
+            except ValueError:
+                pass
+        elif arg.startswith("quiz_"):
+            deep_link_quiz_id = arg[5:]
+        elif arg.startswith("battle_"):
+            deep_link_battle_id = arg[7:]
 
     users_repo.upsert_user(user_id, username)
 
-    # Process Referral
-    if referrer_id:
-        if users_repo.set_referrer(user_id, referrer_id):
-            # Notify referrer
-            try:
-                bot.send_message(referrer_id, f"🎉 New user {display_name} joined via your link!")
-                # Check for milestone rewards
-                users_repo.check_and_reward_referral_milestone(referrer_id, bot, settings_repo)
-            except Exception:
-                pass # Referral notification failed (blocked bot etc)
+    # Store pending referral — actual credit happens after channel join
+    if referrer_id and referrer_id != user_id:
+        existing = users_repo.get(user_id) or {}
+        if not existing.get("invited_by"):
+            users_repo.set_pending_referrer(user_id, referrer_id)
 
     if cfg.maintenance_mode:
         bot.send_message(user_id, "The bot is currently under maintenance. Please try again later.")
@@ -193,6 +204,17 @@ def handle_start(message: Message):
         bot.send_message(user_id, msg_text, parse_mode="HTML", reply_markup=kb)
         return
 
+    # User is subscribed — process pending referral now
+    _process_pending_referral(user_id, display_name)
+
+    # Handle deep link quiz/battle
+    if deep_link_quiz_id:
+        _start_shared_quiz(user_id, deep_link_quiz_id)
+        return
+    if deep_link_battle_id:
+        _start_battle_quiz(user_id, deep_link_battle_id)
+        return
+
     text = (
         "<b>Welcome to SmartQuiz Bot!</b>\n\n"
         "Turn your notes into interactive questions effortlessly.\n\n"
@@ -206,6 +228,21 @@ def handle_start(message: Message):
         "Your support makes this bot better!"
     )
     bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu(user_id), disable_web_page_preview=True)
+
+
+def _process_pending_referral(user_id: int, display_name: str = "Someone"):
+    """Process pending referral after user joins the required channels."""
+    if not users_repo:
+        return
+    pending_ref = users_repo.get_pending_referrer(user_id)
+    if pending_ref:
+        if users_repo.set_referrer(user_id, pending_ref):
+            try:
+                bot.send_message(pending_ref, f"🎉 New user {display_name} joined via your link!")
+                users_repo.check_and_reward_referral_milestone(pending_ref, bot, settings_repo)
+            except Exception:
+                pass
+        users_repo.clear_pending_referrer(user_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "home")
@@ -230,7 +267,13 @@ def handle_home(call: CallbackQuery):
             bot.send_message(user_id, msg_text, parse_mode="HTML", reply_markup=kb)
         return
 
+    # User is now subscribed — process any pending referral
+    display_name = call.from_user.first_name or call.from_user.username or "Someone"
+    _process_pending_referral(user_id, display_name)
+
     pending_notes.pop(user_id, None)
+    pending_quizzes.pop(user_id, None)
+    pending_battles.pop(user_id, None)
     try:
         bot.edit_message_text(
             "🏠 **Home**\nSelect an option below:", 
@@ -348,6 +391,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("📊 Settings Overview", callback_data="admin_settings_overview"),
+        InlineKeyboardButton("📈 Analytics", callback_data="admin_analytics"),
         InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
         InlineKeyboardButton("🔐 Force Subscription", callback_data="admin_manage_sub"),
         InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
@@ -850,11 +894,20 @@ def handle_view_quiz(call: CallbackQuery):
         bot.answer_callback_query(call.id, "Quiz not found")
         return
 
+    shares = quiz.get('share_count', 0)
+    plays = quiz.get('play_count', 0)
     text = f"<b>{quiz.get('title')}</b>\n"
     text += f"Questions: {len(quiz.get('questions', []))}\n"
     text += f"Date: {quiz.get('created_at')}\n"
+    if shares or plays:
+        text += f"\n📊 Shared: {shares} | Played: {plays}\n"
+
+    bot_username = get_bot_info().username or "SmartQuizBot"
+    share_link = f"https://t.me/{bot_username}?start=quiz_{quiz_id}"
 
     kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(InlineKeyboardButton("🔗 Share Link", url=f"https://t.me/share/url?url={share_link}&text=Try this quiz!"))
+    kb.add(InlineKeyboardButton("⚔️ Challenge Friend", callback_data=f"startbattle_{quiz_id}"))
     # Exports
     kb.add(InlineKeyboardButton("📄 Export PDF", callback_data=f"exp_{quiz_id}_pdf"))
     kb.add(InlineKeyboardButton("📝 Export DOCX", callback_data=f"exp_{quiz_id}_docx"))
@@ -1464,6 +1517,18 @@ def send_now(call: CallbackQuery):
                 "created_at": datetime.now()
             })
 
+        # Update streak and progress
+        if users_repo:
+            users_repo.update_streak(user_id)
+        if progress_repo and target == user_id:
+            progress_repo.record_quiz_attempt(
+                user_id=user_id,
+                quiz_id="",
+                score=len(questions),
+                total=len(questions),
+                topic=quiz_title,
+            )
+
         # Send summary
         destinations = state.get("target_label", "PM")
         try:
@@ -2009,15 +2074,24 @@ def handle_admin_callbacks(call: CallbackQuery):
         msg = bot.send_message(user_id, "💰 **Set Price**\n\nSend digits.")
         bot.register_next_step_handler(msg, process_set_price)
     
+    elif call.data == "admin_analytics":
+        _show_admin_analytics(call)
+
     elif call.data == "admin_users":
-        total_users = users_repo.collection.count_documents({})
-        text = f"Total Users: {total_users}"
+        total_users = users_repo.count_all()
+        premium = users_repo.count_premium()
+        text = (
+            f"👥 <b>User Management</b>\n\n"
+            f"Total Users: {total_users}\n"
+            f"Premium: {premium}\n\n"
+            f"Use /addpremium, /addadmin, /removeadmin commands."
+        )
         kb = InlineKeyboardMarkup()
         kb.add(InlineKeyboardButton("🔙 Back", callback_data="admin_menu"))
         try:
-            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
         except:
-            bot.send_message(user_id, text, reply_markup=kb)
+            bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
             
     elif call.data == "close_admin":
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -2233,6 +2307,560 @@ def admin_remove_admin(message: Message):
     target_id = int(parts[1])
     users_repo.set_role(target_id, "user")
     bot.reply_to(message, f"User {target_id} demoted from admin.")
+
+
+# ═══════════════════════════════════════════════════════
+# ▶ ADMIN ANALYTICS DASHBOARD
+# ═══════════════════════════════════════════════════════
+
+def _show_admin_analytics(call: CallbackQuery):
+    user_id = call.from_user.id
+    try:
+        total_users = users_repo.count_all()
+        premium_users = users_repo.count_premium()
+        admin_count = users_repo.count_admins()
+        api_key_users = users_repo.count_with_api_key()
+        active_today = users_repo.count_active_today()
+        active_week = users_repo.count_active_week()
+        new_today = users_repo.count_new_today()
+        new_week = users_repo.count_new_week()
+        top_inviters = users_repo.get_top_inviters(5)
+
+        total_quizzes = quizzes_repo.count_all() if quizzes_repo else 0
+        quizzes_today = quizzes_repo.count_today() if quizzes_repo else 0
+
+        # Build top inviters text
+        top_text = ""
+        for i, inv in enumerate(top_inviters, 1):
+            name = inv.get("username") or str(inv.get("id"))
+            count = inv.get("referral_count", 0)
+            medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i - 1] if i <= 5 else f"{i}."
+            top_text += f"  {medal} @{name} — {count} invites\n"
+
+        if not top_text:
+            top_text = "  No referrals yet\n"
+
+        text = (
+            "📈 <b>Analytics Dashboard</b>\n\n"
+            "━━━━━ <b>👥 Users</b> ━━━━━\n"
+            f"  Total: <b>{total_users}</b>\n"
+            f"  Premium: <b>{premium_users}</b> ⭐\n"
+            f"  Admins: <b>{admin_count}</b>\n"
+            f"  With Own API Key: <b>{api_key_users}</b> 🔑\n\n"
+            "━━━━━ <b>📊 Activity</b> ━━━━━\n"
+            f"  Active Today: <b>{active_today}</b>\n"
+            f"  Active This Week: <b>{active_week}</b>\n"
+            f"  New Users Today: <b>{new_today}</b>\n"
+            f"  New This Week: <b>{new_week}</b>\n\n"
+            "━━━━━ <b>📝 Quizzes</b> ━━━━━\n"
+            f"  Total Generated: <b>{total_quizzes}</b>\n"
+            f"  Generated Today: <b>{quizzes_today}</b>\n\n"
+            "━━━━━ <b>🏆 Top Inviters</b> ━━━━━\n"
+            f"{top_text}\n"
+            "━━━━━ <b>📉 Conversion</b> ━━━━━\n"
+            f"  Premium Rate: <b>{round(premium_users / total_users * 100, 1) if total_users else 0}%</b>\n"
+            f"  API Key Rate: <b>{round(api_key_users / total_users * 100, 1) if total_users else 0}%</b>\n"
+        )
+
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="admin_analytics"))
+        kb.add(InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu"))
+
+        try:
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        bot.send_message(user_id, f"Error loading analytics: {e}")
+
+
+# ═══════════════════════════════════════════════════════
+# ▶ PROGRESS DASHBOARD & STREAKS
+# ═══════════════════════════════════════════════════════
+
+@bot.callback_query_handler(func=lambda call: call.data == "progress")
+@error_handler
+def handle_progress(call: CallbackQuery):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+
+    streak = users_repo.get_streak_info(user_id) if users_repo else {"current": 0, "best": 0}
+    stats = progress_repo.get_user_stats(user_id) if progress_repo else {}
+
+    current_streak = streak.get("current", 0)
+    best_streak = streak.get("best", 0)
+    total_quizzes = stats.get("total_quizzes", 0)
+    total_questions = stats.get("total_questions", 0)
+    total_correct = stats.get("total_correct", 0)
+    avg_accuracy = stats.get("avg_accuracy", 0)
+    best_topic = stats.get("best_topic", "N/A")
+
+    # Streak fire emoji scaling
+    fire = "🔥" * min(current_streak, 5) if current_streak > 0 else "❄️"
+
+    text = (
+        f"📈 <b>Your Progress Dashboard</b>\n\n"
+        f"━━━━━ <b>🔥 Streaks</b> ━━━━━\n"
+        f"  Current: <b>{current_streak} days</b> {fire}\n"
+        f"  Best: <b>{best_streak} days</b> 🏅\n\n"
+        f"━━━━━ <b>📊 Stats</b> ━━━━━\n"
+        f"  Quizzes Taken: <b>{total_quizzes}</b>\n"
+        f"  Questions Answered: <b>{total_questions}</b>\n"
+        f"  Correct Answers: <b>{total_correct}</b>\n"
+        f"  Average Accuracy: <b>{avg_accuracy}%</b>\n\n"
+        f"━━━━━ <b>🎯 Best Topic</b> ━━━━━\n"
+        f"  {best_topic}\n\n"
+        f"💡 <i>Generate more quizzes to keep your streak alive!</i>"
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📝 Generate Quiz", callback_data="generate"))
+    kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+
+# ═══════════════════════════════════════════════════════
+# ▶ QUIZ BATTLE MODE
+# ═══════════════════════════════════════════════════════
+
+@bot.callback_query_handler(func=lambda call: call.data == "battle_menu")
+@error_handler
+def handle_battle_menu(call: CallbackQuery):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+
+    battles = battles_repo.get_user_battles(user_id, limit=5) if battles_repo else []
+
+    text = "🏆 <b>Quiz Battles</b>\n\n"
+    if battles:
+        text += "<b>Recent Battles:</b>\n"
+        for b in battles:
+            status = b.get("status", "waiting")
+            quiz = quizzes_repo.get_quiz(str(b.get("quiz_id", ""))) if quizzes_repo else None
+            title = quiz.get("title", "Quiz") if quiz else "Quiz"
+
+            if status == "waiting":
+                text += f"⏳ {title} — waiting for opponent\n"
+            else:
+                c_score = b.get("challenger_score", 0)
+                o_score = b.get("opponent_score", 0)
+                total = b.get("challenger_total", 0)
+                if b.get("challenger_id") == user_id:
+                    icon = "🎉" if c_score > o_score else ("🤝" if c_score == o_score else "😤")
+                    text += f"{icon} {title}: You {c_score}/{total} vs Opponent {o_score}/{total}\n"
+                else:
+                    icon = "🎉" if o_score > c_score else ("🤝" if c_score == o_score else "😤")
+                    text += f"{icon} {title}: You {o_score}/{total} vs Challenger {c_score}/{total}\n"
+    else:
+        text += "No battles yet!\n\n"
+
+    text += "\n💡 <i>Go to My Quizzes → select a quiz → ⚔️ Challenge Friend</i>"
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📂 My Quizzes", callback_data="my_quizzes"))
+    kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("startbattle_"))
+@error_handler
+def handle_create_battle(call: CallbackQuery):
+    """Challenger creates a battle — they take the quiz first, then get a link."""
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    quiz_id = call.data.split("_", 1)[1]
+    quiz = quizzes_repo.get_quiz(quiz_id) if quizzes_repo else None
+
+    if not quiz:
+        bot.send_message(user_id, "Quiz not found.")
+        return
+
+    questions = quiz.get("questions", [])
+    if not questions:
+        bot.send_message(user_id, "This quiz has no questions.")
+        return
+
+    # Start interactive quiz for the challenger
+    pending_battles[user_id] = {
+        "quiz_id": quiz_id,
+        "questions": questions,
+        "current_index": 0,
+        "score": 0,
+        "total": len(questions),
+        "mode": "challenger",
+        "title": quiz.get("title", "Quiz"),
+    }
+
+    bot.send_message(user_id, f"⚔️ <b>Battle Mode!</b>\n\nTake the quiz first, then challenge your friend.\n\nQuiz: <b>{quiz.get('title')}</b>\nQuestions: {len(questions)}", parse_mode="HTML")
+    _send_battle_question(user_id)
+
+
+def _start_battle_quiz(user_id: int, battle_id: str):
+    """Opponent starts a battle from deep link."""
+    if not battles_repo:
+        bot.send_message(user_id, "Battles unavailable.")
+        return
+
+    battle = battles_repo.get_battle(battle_id)
+    if not battle:
+        bot.send_message(user_id, "Battle not found or expired.", reply_markup=home_keyboard())
+        return
+
+    if battle.get("status") != "waiting":
+        c_score = battle.get("challenger_score", 0)
+        o_score = battle.get("opponent_score", 0)
+        total = battle.get("challenger_total", 0)
+        bot.send_message(user_id, f"This battle is already completed!\n\nChallenger: {c_score}/{total}\nOpponent: {o_score}/{total}", reply_markup=home_keyboard())
+        return
+
+    if battle.get("challenger_id") == user_id:
+        bot.send_message(user_id, "You can't battle yourself! Share the link with a friend.", reply_markup=home_keyboard())
+        return
+
+    quiz = quizzes_repo.get_quiz(str(battle.get("quiz_id", ""))) if quizzes_repo else None
+    if not quiz:
+        bot.send_message(user_id, "Quiz for this battle not found.", reply_markup=home_keyboard())
+        return
+
+    questions = quiz.get("questions", [])
+    pending_battles[user_id] = {
+        "battle_id": battle_id,
+        "quiz_id": str(battle.get("quiz_id")),
+        "questions": questions,
+        "current_index": 0,
+        "score": 0,
+        "total": len(questions),
+        "mode": "opponent",
+        "title": quiz.get("title", "Quiz"),
+        "challenger_id": battle.get("challenger_id"),
+        "challenger_score": battle.get("challenger_score", 0),
+    }
+
+    bot.send_message(user_id, f"⚔️ <b>Battle Challenge!</b>\n\nSomeone challenged you to a quiz battle!\n\nQuiz: <b>{quiz.get('title')}</b>\nQuestions: {len(questions)}", parse_mode="HTML")
+    _send_battle_question(user_id)
+
+
+def _send_battle_question(user_id: int):
+    state = pending_battles.get(user_id)
+    if not state:
+        return
+
+    idx = state["current_index"]
+    questions = state["questions"]
+
+    if idx >= len(questions):
+        _finish_battle(user_id)
+        return
+
+    q = questions[idx]
+    letters = ["A", "B", "C", "D"]
+    text = f"<b>Question {idx + 1}/{len(questions)}</b>\n\n"
+    text += f"{q['question']}\n\n"
+    for i, c in enumerate(q["choices"]):
+        prefix = letters[i] if i < len(letters) else str(i + 1)
+        text += f"{prefix}. {c}\n"
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    for i in range(len(q["choices"])):
+        letter = letters[i] if i < len(letters) else str(i + 1)
+        kb.add(InlineKeyboardButton(letter, callback_data=f"ba_{i}"))
+
+    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ba_"))
+@error_handler
+def handle_battle_answer(call: CallbackQuery):
+    user_id = call.from_user.id
+    state = pending_battles.get(user_id)
+
+    if not state:
+        bot.answer_callback_query(call.id, "No active battle.")
+        return
+
+    bot.answer_callback_query(call.id)
+    chosen = int(call.data.split("_")[1])
+    idx = state["current_index"]
+    q = state["questions"][idx]
+    correct = q.get("answer_index", -1)
+
+    letters = ["A", "B", "C", "D"]
+    if chosen == correct:
+        state["score"] += 1
+        result_text = "✅ Correct!"
+    else:
+        correct_letter = letters[correct] if correct < len(letters) else "?"
+        result_text = f"❌ Wrong! Answer: {correct_letter}"
+
+    state["current_index"] += 1
+    try:
+        bot.edit_message_text(
+            f"{result_text}\n\nScore: {state['score']}/{state['current_index']}",
+            call.message.chat.id, call.message.message_id
+        )
+    except Exception:
+        pass
+
+    import threading
+    threading.Timer(1.0, _send_battle_question, args=[user_id]).start()
+
+
+def _finish_battle(user_id: int):
+    state = pending_battles.pop(user_id, None)
+    if not state:
+        return
+
+    score = state["score"]
+    total = state["total"]
+    title = state["title"]
+
+    if state["mode"] == "challenger":
+        # Create battle record
+        battle_id = battles_repo.create_battle(
+            challenger_id=user_id,
+            quiz_id=state["quiz_id"],
+            challenger_score=score,
+            challenger_total=total,
+        )
+
+        bot_username = get_bot_info().username or "SmartQuizBot"
+        battle_link = f"https://t.me/{bot_username}?start=battle_{battle_id}"
+
+        text = (
+            f"🏆 <b>Battle Created!</b>\n\n"
+            f"Quiz: <b>{title}</b>\n"
+            f"Your Score: <b>{score}/{total}</b>\n\n"
+            f"Share this link to challenge a friend:\n"
+            f"<code>{battle_link}</code>\n\n"
+            f"⏳ Waiting for opponent..."
+        )
+
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("📤 Share Battle", url=f"https://t.me/share/url?url={battle_link}&text=I challenge you to a quiz battle! 🏆"))
+        kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+        bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+    elif state["mode"] == "opponent":
+        battle_id = state.get("battle_id")
+        challenger_id = state.get("challenger_id")
+        challenger_score = state.get("challenger_score", 0)
+
+        # Record opponent score
+        if battles_repo and battle_id:
+            battles_repo.set_opponent_score(battle_id, user_id, score, total)
+
+        # Determine winner
+        if score > challenger_score:
+            result = "🎉 <b>YOU WIN!</b>"
+            challenger_result = "😤 You lost the battle!"
+        elif score < challenger_score:
+            result = "😤 <b>You lost!</b>"
+            challenger_result = "🎉 You won the battle!"
+        else:
+            result = "🤝 <b>It's a tie!</b>"
+            challenger_result = "🤝 It's a tie!"
+
+        text = (
+            f"⚔️ <b>Battle Results</b>\n\n"
+            f"Quiz: <b>{title}</b>\n\n"
+            f"{result}\n\n"
+            f"📊 Your Score: <b>{score}/{total}</b>\n"
+            f"📊 Challenger: <b>{challenger_score}/{total}</b>"
+        )
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+        bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+        # Notify challenger
+        if challenger_id:
+            try:
+                notify_text = (
+                    f"⚔️ <b>Battle Result!</b>\n\n"
+                    f"Quiz: <b>{title}</b>\n"
+                    f"{challenger_result}\n\n"
+                    f"📊 You: <b>{challenger_score}/{total}</b>\n"
+                    f"📊 Opponent: <b>{score}/{total}</b>"
+                )
+                bot.send_message(challenger_id, notify_text, parse_mode="HTML", reply_markup=home_keyboard())
+            except Exception:
+                pass
+
+    # Record progress for both
+    if progress_repo:
+        progress_repo.record_quiz_attempt(user_id, state.get("quiz_id", ""), score, total, title)
+    if users_repo:
+        users_repo.update_streak(user_id)
+
+
+# ═══════════════════════════════════════════════════════
+# ▶ SHAREABLE QUIZ LINKS — Interactive Quiz Taking
+# ═══════════════════════════════════════════════════════
+
+def _start_shared_quiz(user_id: int, quiz_id: str):
+    """Start an interactive quiz from a shared deep link."""
+    if not quizzes_repo:
+        bot.send_message(user_id, "Quizzes unavailable.", reply_markup=home_keyboard())
+        return
+
+    quiz = quizzes_repo.get_quiz(quiz_id)
+    if not quiz:
+        bot.send_message(user_id, "Quiz not found or expired.", reply_markup=home_keyboard())
+        return
+
+    questions = quiz.get("questions", [])
+    if not questions:
+        bot.send_message(user_id, "This quiz has no questions.", reply_markup=home_keyboard())
+        return
+
+    # Track play count
+    quizzes_repo.increment_play_count(quiz_id)
+
+    pending_quizzes[user_id] = {
+        "quiz_id": quiz_id,
+        "questions": questions,
+        "current_index": 0,
+        "score": 0,
+        "total": len(questions),
+        "title": quiz.get("title", "Quiz"),
+    }
+
+    owner_name = ""
+    if quiz.get("user_id"):
+        owner = users_repo.get(quiz["user_id"]) if users_repo else None
+        if owner:
+            owner_name = f"\nCreated by: @{owner.get('username', 'unknown')}"
+
+    bot.send_message(
+        user_id,
+        f"📋 <b>Shared Quiz</b>\n\n"
+        f"<b>{quiz.get('title')}</b>{owner_name}\n"
+        f"Questions: {len(questions)}\n\n"
+        f"Let's start! 🚀",
+        parse_mode="HTML"
+    )
+    _send_shared_question(user_id)
+
+
+def _send_shared_question(user_id: int):
+    state = pending_quizzes.get(user_id)
+    if not state:
+        return
+
+    idx = state["current_index"]
+    questions = state["questions"]
+
+    if idx >= len(questions):
+        _finish_shared_quiz(user_id)
+        return
+
+    q = questions[idx]
+    letters = ["A", "B", "C", "D"]
+    text = f"<b>Question {idx + 1}/{len(questions)}</b>\n\n"
+    text += f"{q['question']}\n\n"
+    for i, c in enumerate(q["choices"]):
+        prefix = letters[i] if i < len(letters) else str(i + 1)
+        text += f"{prefix}. {c}\n"
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    for i in range(len(q["choices"])):
+        letter = letters[i] if i < len(letters) else str(i + 1)
+        kb.add(InlineKeyboardButton(letter, callback_data=f"qa_{i}"))
+
+    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("qa_"))
+@error_handler
+def handle_shared_quiz_answer(call: CallbackQuery):
+    user_id = call.from_user.id
+    state = pending_quizzes.get(user_id)
+
+    if not state:
+        bot.answer_callback_query(call.id, "No active quiz.")
+        return
+
+    bot.answer_callback_query(call.id)
+    chosen = int(call.data.split("_")[1])
+    idx = state["current_index"]
+    q = state["questions"][idx]
+    correct = q.get("answer_index", -1)
+
+    letters = ["A", "B", "C", "D"]
+    if chosen == correct:
+        state["score"] += 1
+        result_text = "✅ Correct!"
+    else:
+        correct_letter = letters[correct] if correct < len(letters) else "?"
+        result_text = f"❌ Wrong! Answer: {correct_letter}"
+
+    explanation = q.get("explanation", "")
+    if explanation:
+        result_text += f"\n💡 {explanation}"
+
+    state["current_index"] += 1
+    try:
+        bot.edit_message_text(
+            f"{result_text}\n\nScore: {state['score']}/{state['current_index']}",
+            call.message.chat.id, call.message.message_id
+        )
+    except Exception:
+        pass
+
+    import threading
+    threading.Timer(1.5, _send_shared_question, args=[user_id]).start()
+
+
+def _finish_shared_quiz(user_id: int):
+    state = pending_quizzes.pop(user_id, None)
+    if not state:
+        return
+
+    score = state["score"]
+    total = state["total"]
+    title = state["title"]
+    accuracy = round((score / total) * 100, 1) if total else 0
+
+    # Performance rating
+    if accuracy >= 90:
+        rating = "🌟 Outstanding!"
+    elif accuracy >= 70:
+        rating = "👏 Great job!"
+    elif accuracy >= 50:
+        rating = "👍 Not bad!"
+    else:
+        rating = "📚 Keep studying!"
+
+    text = (
+        f"🏁 <b>Quiz Complete!</b>\n\n"
+        f"<b>{title}</b>\n\n"
+        f"📊 Score: <b>{score}/{total}</b>\n"
+        f"📈 Accuracy: <b>{accuracy}%</b>\n\n"
+        f"{rating}"
+    )
+
+    kb = InlineKeyboardMarkup()
+    # Let them share the same quiz
+    bot_username = get_bot_info().username or "SmartQuizBot"
+    share_link = f"https://t.me/{bot_username}?start=quiz_{state['quiz_id']}"
+    kb.add(InlineKeyboardButton("📤 Share This Quiz", url=f"https://t.me/share/url?url={share_link}&text=I scored {score}/{total}! Can you beat me?"))
+    kb.add(InlineKeyboardButton("🔙 Home", callback_data="home"))
+    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+
+    # Record progress
+    if progress_repo:
+        progress_repo.record_quiz_attempt(user_id, state.get("quiz_id", ""), score, total, title)
+    if users_repo:
+        users_repo.update_streak(user_id)
+
+
 print("Bot running...")
 if __name__ == "__main__":
     bot.infinity_polling()

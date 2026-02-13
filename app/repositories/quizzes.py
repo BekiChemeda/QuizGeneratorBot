@@ -31,3 +31,22 @@ class QuizzesRepository:
             return self.collection.find_one({"_id": ObjectId(quiz_id)})
         except Exception:
             return None
+
+    def count_all(self) -> int:
+        return self.collection.count_documents({})
+
+    def count_today(self) -> int:
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return self.collection.count_documents({"created_at": {"$gte": today_start}})
+
+    def increment_share_count(self, quiz_id: str) -> None:
+        try:
+            self.collection.update_one({"_id": ObjectId(quiz_id)}, {"$inc": {"share_count": 1}})
+        except Exception:
+            pass
+
+    def increment_play_count(self, quiz_id: str) -> None:
+        try:
+            self.collection.update_one({"_id": ObjectId(quiz_id)}, {"$inc": {"play_count": 1}})
+        except Exception:
+            pass

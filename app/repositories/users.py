@@ -181,3 +181,101 @@ class UsersRepository:
 
     def revoke_admin(self, user_id: int) -> None:
         self.collection.update_one({"id": user_id}, {"$set": {"role": "user"}})
+
+    # --- Pending Referral ---
+    def set_pending_referrer(self, user_id: int, referrer_id: int) -> None:
+        self.collection.update_one({"id": user_id}, {"$set": {"pending_referrer": referrer_id}}, upsert=True)
+
+    def get_pending_referrer(self, user_id: int) -> Optional[int]:
+        user = self.get(user_id)
+        return user.get("pending_referrer") if user else None
+
+    def clear_pending_referrer(self, user_id: int) -> None:
+        self.collection.update_one({"id": user_id}, {"$unset": {"pending_referrer": ""}})
+
+    # --- Analytics Aggregation ---
+    def count_all(self) -> int:
+        return self.collection.count_documents({})
+
+    def count_premium(self) -> int:
+        now = datetime.now()
+        return self.collection.count_documents({
+            "type": "premium",
+            "$or": [
+                {"premium_until": None},
+                {"premium_until": {"$gt": now}},
+                {"premium_until": {"$exists": False}},
+            ]
+        })
+
+    def count_with_api_key(self) -> int:
+        return self.collection.count_documents({
+            "gemini_api_key": {"$exists": True, "$ne": None, "$ne": ""}
+        })
+
+    def count_admins(self) -> int:
+        return self.collection.count_documents({"role": "admin"})
+
+    def get_top_inviters(self, limit: int = 5) -> list:
+        return list(
+            self.collection.find(
+                {"referral_count": {"$gt": 0}},
+                {"id": 1, "username": 1, "referral_count": 1, "_id": 0}
+            ).sort("referral_count", -1).limit(limit)
+        )
+
+    def count_active_today(self) -> int:
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return self.collection.count_documents({"last_note_time": {"$gte": today_start}})
+
+    def count_active_week(self) -> int:
+        week_ago = datetime.now() - timedelta(days=7)
+        return self.collection.count_documents({"last_note_time": {"$gte": week_ago}})
+
+    def count_new_today(self) -> int:
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return self.collection.count_documents({"registered_at": {"$gte": today_start}})
+
+    def count_new_week(self) -> int:
+        week_ago = datetime.now() - timedelta(days=7)
+        return self.collection.count_documents({"registered_at": {"$gte": week_ago}})
+
+    # --- Streak Management ---
+    def update_streak(self, user_id: int) -> dict:
+        user = self.get(user_id) or {}
+        today = datetime.now().date()
+        last_date = user.get("streak_last_date")
+
+        current = user.get("streak_current", 0)
+        best = user.get("streak_best", 0)
+
+        if last_date:
+            if isinstance(last_date, datetime):
+                last_date = last_date.date()
+            elif isinstance(last_date, str):
+                try:
+                    last_date = datetime.fromisoformat(last_date).date()
+                except Exception:
+                    last_date = None
+
+        if last_date == today:
+            return {"current": current, "best": best}
+        elif last_date and (today - last_date).days == 1:
+            current += 1
+        else:
+            current = 1
+
+        best = max(best, current)
+        self.collection.update_one({"id": user_id}, {"$set": {
+            "streak_current": current,
+            "streak_best": best,
+            "streak_last_date": datetime.now(),
+        }})
+        return {"current": current, "best": best}
+
+    def get_streak_info(self, user_id: int) -> dict:
+        user = self.get(user_id) or {}
+        return {
+            "current": user.get("streak_current", 0),
+            "best": user.get("streak_best", 0),
+        }
