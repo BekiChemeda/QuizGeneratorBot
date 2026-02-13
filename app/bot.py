@@ -1,7 +1,8 @@
 import time
 from datetime import datetime, timedelta, timezone
 from pymongo.errors import DuplicateKeyError
-from telebot import TeleBot
+from telebot import TeleBot, apihelper
+from telebot.apihelper import ApiTelegramException
 from telebot.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -9,6 +10,7 @@ from telebot.types import (
     Message,
 )
 from bson import ObjectId
+import re
 
 from .config import get_config
 from .db import init_db, get_db
@@ -396,6 +398,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("🔐 Force Subscription", callback_data="admin_manage_sub"),
         InlineKeyboardButton("💰 Set Premium Price", callback_data="admin_set_price"),
         InlineKeyboardButton("👥 Manage Users", callback_data="admin_users"),
+        InlineKeyboardButton("🔍 Lookup User", callback_data="admin_lookup"),
         InlineKeyboardButton("🔙 Close", callback_data="close_admin"),
     )
     return kb
@@ -2111,6 +2114,14 @@ def handle_admin_callbacks(call: CallbackQuery):
     elif call.data == "admin_analytics":
         _show_admin_analytics(call)
 
+    elif call.data == "admin_lookup":
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except:
+            pass
+        msg = bot.send_message(user_id, "🔍 **User Lookup**\n\nEnter the User ID or Username (with or without @).")
+        bot.register_next_step_handler(msg, process_admin_user_lookup)
+
     elif call.data == "admin_users":
         total_users = users_repo.count_all()
         premium = users_repo.count_premium()
@@ -2139,6 +2150,25 @@ def handle_admin_callbacks(call: CallbackQuery):
         
     elif call.data == "admin_menu":
         handle_admin_menu_btn(call)
+
+    elif call.data.startswith("admin_give_prem_"):
+        target_id = int(call.data.split("_")[-1])
+        users_repo.set_premium(target_id, 30) # Default 30 days
+        bot.answer_callback_query(call.id, f"User {target_id} is now Premium for 30 days.", show_alert=True)
+        # Refresh details
+        user_doc = users_repo.get(target_id)
+        if user_doc: _show_user_details(user_id, user_doc)
+
+    elif call.data.startswith("admin_give_admin_"):
+        target_id = int(call.data.split("_")[-1])
+        if user_id != cfg.owner_id:
+            bot.answer_callback_query(call.id, "Only owner can promote admins.", show_alert=True)
+            return
+        users_repo.set_admin(target_id)
+        bot.answer_callback_query(call.id, f"User {target_id} is now an Admin.", show_alert=True)
+        # Refresh details
+        user_doc = users_repo.get(target_id)
+        if user_doc: _show_user_details(user_id, user_doc)
 
 def process_set_price(message: Message):
     user_id = message.from_user.id
@@ -2207,6 +2237,14 @@ def execute_broadcast(call: CallbackQuery):
                 else:
                     bot.copy_message(target_id, msg.chat.id, msg.message_id)
                 success_count += 1
+                # Mark as NOT blocked if send was successful
+                users_repo.update_blocked_status(target_id, False)
+            except ApiTelegramException as e:
+                if e.error_code == 403: # Forbidden: bot was blocked by the user
+                    users_repo.update_blocked_status(target_id, True)
+                    logger.info(f"User {target_id} has blocked the bot.")
+                else:
+                    logger.error(f"Failed to send broadcast to {target_id}: {e}")
             except Exception as e:
                 logger.error(f"Failed to send broadcast to {target_id}: {e}")
             
@@ -2221,6 +2259,75 @@ def execute_broadcast(call: CallbackQuery):
 
     threading.Thread(target=run_broadcast, args=(broadcast_msg, user_id), daemon=True).start()
     pending_notes.pop(user_id, None)
+
+def process_admin_user_lookup(message: Message):
+    admin_id = message.from_user.id
+    query = message.text.strip()
+    
+    user_doc = None
+    if query.isdigit():
+        user_doc = users_repo.get(int(query))
+    
+    if not user_doc:
+        user_doc = users_repo.get_by_username(query)
+    
+    if not user_doc:
+        bot.reply_to(message, "❌ **User not found.**", parse_mode="Markdown", reply_markup=admin_keyboard())
+        return
+
+    _show_user_details(admin_id, user_doc)
+
+def _show_user_details(admin_id: int, user_doc: dict):
+    target_id = user_doc["id"]
+    username = user_doc.get("username") or "N/A"
+    role = user_doc.get("role", "user")
+    u_type = user_doc.get("type", "regular")
+    reg_at = user_doc.get("registered_at", "N/A")
+    if hasattr(reg_at, "strftime"): reg_at = reg_at.strftime("%Y-%m-%d %H:%M")
+    
+    premium_until = user_doc.get("premium_until")
+    status = "Regular"
+    if u_type == "premium":
+        if premium_until:
+            if hasattr(premium_until, "strftime"): 
+                status = f"⭐ Premium (until {premium_until.strftime('%Y-%m-%d')})"
+            else:
+                status = "⭐ Premium"
+        else:
+            status = "⭐ Premium (Permanent)"
+            
+    is_blocked = user_doc.get("is_blocked", False)
+    blocked_status = "🔴 BLOCKED" if is_blocked else "🟢 Active"
+    
+    streak = users_repo.get_streak_info(target_id)
+    referrals = user_doc.get("referral_count", 0)
+    
+    # Get quiz stats
+    total_quizzes = quizzes_repo.collection.count_documents({"user_id": target_id}) if quizzes_repo else 0
+    
+    text = (
+        f"👤 **User Details**\n\n"
+        f"• **ID**: `{target_id}`\n"
+        f"• **Username**: @{username}\n"
+        f"• **Role**: `{role}`\n"
+        f"• **Status**: {status}\n"
+        f"• **Bot Interaction**: {blocked_status}\n\n"
+        f"📈 **Activity**:\n"
+        f"• Registered: {reg_at}\n"
+        f"• Streak: {streak.get('current', 0)} days (Best: {streak.get('best', 0)})\n"
+        f"• Quizzes Generated: {total_quizzes}\n\n"
+        f"🔗 **Referrals**: {referrals}\n"
+        f"• Invited By: `{user_doc.get('invited_by', 'None')}`"
+    )
+    
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("⭐ Add Premium", callback_data=f"admin_give_prem_{target_id}"),
+        InlineKeyboardButton("👮 Promote Admin", callback_data=f"admin_give_admin_{target_id}"),
+        InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_menu")
+    )
+    
+    bot.send_message(admin_id, text, parse_mode="Markdown", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda call: call.data in ["confirm_broadcast", "cancel_broadcast"])
 @error_handler
@@ -2358,6 +2465,7 @@ def _show_admin_analytics(call: CallbackQuery):
         active_week = users_repo.count_active_week()
         new_today = users_repo.count_new_today()
         new_week = users_repo.count_new_week()
+        unblocked = users_repo.count_unblocked()
         top_inviters = users_repo.get_top_inviters(5)
 
         total_quizzes = quizzes_repo.count_all() if quizzes_repo else 0
@@ -2380,6 +2488,7 @@ def _show_admin_analytics(call: CallbackQuery):
             f"  Total: <b>{total_users}</b>\n"
             f"  Premium: <b>{premium_users}</b> ⭐\n"
             f"  Admins: <b>{admin_count}</b>\n"
+            f"  Unblocked Users: <b>{unblocked}</b> ✅\n"
             f"  With Own API Key: <b>{api_key_users}</b> 🔑\n\n"
             "━━━━━ <b>📊 Activity</b> ━━━━━\n"
             f"  Active Today: <b>{active_today}</b>\n"

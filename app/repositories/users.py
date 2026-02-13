@@ -193,6 +193,18 @@ class UsersRepository:
     def clear_pending_referrer(self, user_id: int) -> None:
         self.collection.update_one({"id": user_id}, {"$unset": {"pending_referrer": ""}})
 
+    def get_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        """Find a user by username (case-insensitive)."""
+        if not username:
+            return None
+        # Remove @ if present
+        username = username.lstrip("@").strip()
+        return self.collection.find_one({"username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}})
+
+    def update_blocked_status(self, user_id: int, is_blocked: bool) -> None:
+        """Track whether a user has blocked the bot."""
+        self.collection.update_one({"id": user_id}, {"$set": {"is_blocked": is_blocked}})
+
     # --- Analytics Aggregation ---
     def count_all(self) -> int:
         return self.collection.count_documents({})
@@ -215,6 +227,10 @@ class UsersRepository:
 
     def count_admins(self) -> int:
         return self.collection.count_documents({"role": "admin"})
+
+    def count_unblocked(self) -> int:
+        """Count users who haven't blocked the bot (based on last broadcast)."""
+        return self.collection.count_documents({"is_blocked": {"$ne": True}})
 
     def get_top_inviters(self, limit: int = 5) -> list:
         return list(
